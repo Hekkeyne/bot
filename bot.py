@@ -7,8 +7,6 @@ from telegram import Update
 from telegram.error import BadRequest
 
 # === Настройки бота ===
-CHAT_ID = -1002148833759
-TOPIC_ID = 29
 BOT_TOKEN = "6086143518:AAHQhYYXttkZPxQ2J9HNmS7CoFicTjPn7-4"
 
 # === Расписание (вручную из PDF) ===
@@ -87,14 +85,13 @@ SCHEDULE = {
     }
 }
 
-# === База данных ===
+# === База данных для удаления предыдущих сообщений ===
 class ScheduleManager:
-    def __init__(self, db_path="schedule_bot.db"):
-        self.db_path = db_path
+    def __init__(self):
         self.init_db()
     
     def init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect("schedule_bot.db") as conn:
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS bot_messages (
                     id INTEGER PRIMARY KEY,
@@ -105,15 +102,19 @@ class ScheduleManager:
                 )
             ''')
     
-    def save_bot_message(self, chat_id, user_id, message_id):
-        with sqlite3.connect(self.db_path) as conn:
+    def save_message(self, chat_id, user_id, message_id):
+        with sqlite3.connect("schedule_bot.db") as conn:
             conn.execute('DELETE FROM bot_messages WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
             conn.execute('INSERT INTO bot_messages (chat_id, user_id, message_id) VALUES (?, ?, ?)', (chat_id, user_id, message_id))
     
-    def get_last_bot_message(self, chat_id, user_id):
-        with sqlite3.connect(self.db_path) as conn:
-            cur = conn.execute('SELECT message_id, chat_id FROM bot_messages WHERE chat_id = ? AND user_id = ? ORDER BY timestamp DESC LIMIT 1', (chat_id, user_id))
-            return cur.fetchone()
+    def get_last_message(self, chat_id, user_id):
+        with sqlite3.connect("schedule_bot.db") as conn:
+            cur = conn.execute(
+                'SELECT message_id FROM bot_messages WHERE chat_id = ? AND user_id = ? ORDER BY timestamp DESC LIMIT 1',
+                (chat_id, user_id)
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
 
 # === Вспомогательные функции ===
 def get_week_type(date=None):
@@ -121,55 +122,61 @@ def get_week_type(date=None):
         date = datetime.date.today()
     return "even" if date.isocalendar()[1] % 2 == 0 else "odd"
 
-def get_tomorrow_date():
+def get_tomorrow():
     return datetime.date.today() + datetime.timedelta(days=1)
-
-def get_russian_day(english_day):
-    days = {"monday": "Понедельник", "tuesday": "Вторник", "wednesday": "Среда", "thursday": "Четверг", "friday": "Пятница", "saturday": "Суббота", "sunday": "Воскресенье"}
-    return days.get(english_day, english_day)
 
 def get_day_name(date):
     days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
     return days[date.weekday()]
 
-def get_type_emoji(lesson_type):
+def get_russian_day(eng):
+    mapping = {
+        "monday": "Понедельник", "tuesday": "Вторник", "wednesday": "Среда",
+        "thursday": "Четверг", "friday": "Пятница", "saturday": "Суббота", "sunday": "Воскресенье"
+    }
+    return mapping.get(eng, eng)
+
+def get_emoji(lesson_type):
     return {"лекция": "📚", "практика": "✏️", "лабораторная": "🔬"}.get(lesson_type, "📖")
 
-def format_schedule_message(day_name, week_type, date):
+def format_schedule(day_name, week_type, date):
     lessons = SCHEDULE[week_type].get(day_name, [])
     if not lessons:
         return f"📅 Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n\n🎉 Выходной! Пар нет."
 
-    message = f"📅 Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n"
-    message += f"📊 Неделя: {'1-я' if week_type == 'even' else '2-я'}\n\n"
+    msg = f"📅 Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n"
+    msg += f"📊 Неделя: {'1-я' if week_type == 'even' else '2-я'}\n\n"
 
     for i, lesson in enumerate(lessons, 1):
-        group_info = f" ({lesson['groups'][0]})" if lesson['groups'] and lesson['groups'][0] != "все" else ""
-        message += f"{i}. ⏰ {lesson['time']} - {lesson['subject']}{group_info}\n"
-        message += f"   {get_type_emoji(lesson['type'])} {lesson['type'].upper()}\n"
-        message += f"   👨‍🏫 {lesson['teacher']}\n"
-        message += f"   🏫 {lesson['room']}\n\n"
-    return message
+        msg += f"{i}. ⏰ {lesson['time']} - {lesson['subject']}\n"
+        msg += f"   {get_emoji(lesson['type'])} {lesson['type'].upper()}\n"
+        msg += f"   👨‍🏫 {lesson['teacher']}\n"
+        msg += f"   🏫 {lesson['room']}\n"
+        if lesson["groups"] and lesson["groups"][0] != "все":
+            msg += f"   👥 Подгруппа: {lesson['groups'][0]}\n"
+        msg += "\n"
+    return msg.strip()
 
-# === Обработчики ===
-async def delete_previous_bot_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        prev = ScheduleManager().get_last_bot_message(update.effective_chat.id, update.effective_user.id)
-        if prev:
-            await context.bot.delete_message(chat_id=prev[1], message_id=prev[0])
-    except:
-        pass
+# === Обработчики команд ===
+async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    manager = ScheduleManager()
+    last_msg_id = manager.get_last_message(update.effective_chat.id, update.effective_user.id)
+    if last_msg_id:
+        try:
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=last_msg_id)
+        except:
+            pass
 
 def with_cleanup(handler):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await delete_previous_bot_message(update, context)
+        await cleanup(update, context)
         return await handler(update, context)
     return wrapper
 
 @with_cleanup
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🤖 Бот расписания запущен!\n\n"
+        "🤖 Бот расписания\n\n"
         "Команды:\n"
         "/today — сегодня\n"
         "/tomorrow — завтра\n"
@@ -178,73 +185,75 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/now — отправить сейчас"
     )
     msg = await update.message.reply_text(text)
-    ScheduleManager().save_bot_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+    ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 @with_cleanup
-async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.date.today()
-    msg = await update.message.reply_text(format_schedule_message(get_day_name(today), get_week_type(today), today))
-    ScheduleManager().save_bot_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+    msg = await update.message.reply_text(format_schedule(get_day_name(today), get_week_type(today), today))
+    ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 @with_cleanup
-async def tomorrow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tomorrow = get_tomorrow_date()
-    msg = await update.message.reply_text(format_schedule_message(get_day_name(tomorrow), get_week_type(tomorrow), tomorrow))
-    ScheduleManager().save_bot_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tmr = get_tomorrow()
+    msg = await update.message.reply_text(format_schedule(get_day_name(tmr), get_week_type(tmr), tmr))
+    ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 @with_cleanup
-async def day_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mapping = {'понедельник': 'monday', 'вторник': 'tuesday', 'среда': 'wednesday', 'четверг': 'thursday', 'пятница': 'friday', 'суббота': 'saturday', 'воскресенье': 'sunday'}
-    day = mapping.get(" ".join(context.args).lower())
+async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mapping = {
+        'понедельник': 'monday', 'вторник': 'tuesday', 'среда': 'wednesday',
+        'четверг': 'thursday', 'пятница': 'friday', 'суббота': 'saturday', 'воскресенье': 'sunday'
+    }
+    arg = " ".join(context.args).lower()
+    day = mapping.get(arg)
     if not day:
         msg = await update.message.reply_text("❌ Укажите день: /day понедельник")
     else:
         target = datetime.date.today()
         while get_day_name(target) != day:
             target += datetime.timedelta(days=1)
-        msg = await update.message.reply_text(format_schedule_message(day, get_week_type(target), target))
-    ScheduleManager().save_bot_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+        msg = await update.message.reply_text(format_schedule(day, get_week_type(target), target))
+    ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 @with_cleanup
-async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.date.today()
     week_type = get_week_type(today)
     text = "📅 Расписание на неделю\n\n"
     for eng in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
         lessons = SCHEDULE[week_type].get(eng, [])
-        day_ru = get_russian_day(eng)
+        ru = get_russian_day(eng)
         if lessons:
-            text += f"**{day_ru}**:\n"
+            text += f"**{ru}**:\n"
             for lesson in lessons:
-                group = f" ({lesson['groups'][0]})" if lesson['groups'] and lesson['groups'][0] != "все" else ""
+                group = f" (Подгруппа: {lesson['groups'][0]})" if lesson["groups"] and lesson["groups"][0] != "все" else ""
                 text += f"  ⏰ {lesson['time']} – {lesson['subject']}{group}\n"
             text += "\n"
         else:
-            text += f"**{day_ru}**: 🎉 Выходной\n\n"
+            text += f"**{ru}**: 🎉 Выходной\n\n"
     text += f"📊 Неделя: {'1-я' if week_type == 'even' else '2-я'}"
     msg = await update.message.reply_text(text, parse_mode='Markdown')
-    ScheduleManager().save_bot_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+    ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 @with_cleanup
-async def now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tomorrow = get_tomorrow_date()
-    msg = await context.bot.send_message(chat_id=CHAT_ID, message_thread_id=TOPIC_ID, text=format_schedule_message(get_day_name(tomorrow), get_week_type(tomorrow), tomorrow))
-    await update.message.reply_text("✅ Расписание отправлено!")
-    ScheduleManager().save_bot_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+async def now_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Просто пример — можно убрать или оставить как тест
+    msg = await update.message.reply_text("✅ Бот работает!")
+    ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 # === Запуск ===
 def main():
     logging.basicConfig(level=logging.INFO)
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("today", today_command))
-    app.add_handler(CommandHandler("tomorrow", tomorrow_command))
-    app.add_handler(CommandHandler("day", day_command))
-    app.add_handler(CommandHandler("week", week_command))
-    app.add_handler(CommandHandler("now", now_command))
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("today", today_cmd))
+    app.add_handler(CommandHandler("tomorrow", tomorrow_cmd))
+    app.add_handler(CommandHandler("day", day_cmd))
+    app.add_handler(CommandHandler("week", week_cmd))
+    app.add_handler(CommandHandler("now", now_cmd))
     print("✅ Бот запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
