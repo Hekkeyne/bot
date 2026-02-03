@@ -9,7 +9,7 @@ from telegram.error import BadRequest
 # === Настройки бота ===
 CHAT_ID = -1002148833759
 TOPIC_ID = 29
-BOT_TOKEN = "6086143518:AAGnbv6OAjSyyahXETPjvVCyeZLeiVku5yA"
+BOT_TOKEN = "6086143518:AAHQhYYXttkZPxQ2J9HNmS7CoFicTjPn7-4"
 
 # === Расписание (вручную из PDF) ===
 SCHEDULE = {
@@ -247,3 +247,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
