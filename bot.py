@@ -13,7 +13,6 @@ BOT_TOKEN = "6086143518:AAGnbv6OAjSyyahXETPjvVCyeZLeiVku5yA"
 
 # === ВСТАВЬ РАСПИСАНИЕ ЗДЕСЬ ===
 SCHEDULE = {
-    {
   "even": {
     "monday": [],
     "tuesday": [
@@ -438,7 +437,6 @@ SCHEDULE = {
     "sunday": []
     }
   }
-}
 
 # === Класс менеджера расписания ===
 class ScheduleManager:
