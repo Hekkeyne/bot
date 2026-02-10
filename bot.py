@@ -244,7 +244,8 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = datetime.date.today()
         while get_day_name(target) != day:
             target += datetime.timedelta(days=1)
-        msg = await update.message.reply_text(format_schedule(day, get_week_type(target), target))    ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+        msg = await update.message.reply_text(format_schedule(day, get_week_type(target), target))    
+        ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 @with_cleanup
 async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -293,7 +294,8 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
-    app.add_handler(CommandHandler("tomorrow", tomorrow_cmd))    app.add_handler(CommandHandler("day", day_cmd))
+    app.add_handler(CommandHandler("tomorrow", tomorrow_cmd))    
+    app.add_handler(CommandHandler("day", day_cmd))
     app.add_handler(CommandHandler("week", week_cmd))
     app.add_handler(CommandHandler("now", now_cmd))
     print("✅ Бот запущен!")
@@ -301,4 +303,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
