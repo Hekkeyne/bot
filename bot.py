@@ -293,7 +293,8 @@ async def now_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 def main():
-    logging.basicConfig(level=logging.INFO)    app = Application.builder().token(BOT_TOKEN).build()
+    logging.basicConfig(level=logging.INFO)    
+    app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("tomorrow", tomorrow_cmd))
@@ -305,4 +306,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
