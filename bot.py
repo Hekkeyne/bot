@@ -160,7 +160,8 @@ def format_schedule(day_name, week_type, date):
             lesson = group[0]
             subgroup = lesson['groups'][0] if lesson['groups'] and lesson['groups'][0] != "все" else ""
             subgroup_str = f" ({subgroup})" if subgroup else ""
-            msg += f"{idx}. ⏰ {time_slot} – {get_emoji(lesson['type'])} {lesson['subject']}{subgroup_str}\n"
+            msg += f"{idx}. ⏰ {time_slot}\n"
+            msg += f"   {get_emoji(lesson['type'])} {lesson['subject'].title()}{subgroup_str}\n"
             msg += f"   👨‍🏫 {lesson['teacher']}\n"
             msg += f"   🏫 {lesson['room']}\n\n"
         else:
@@ -172,10 +173,11 @@ def format_schedule(day_name, week_type, date):
             for lesson in group:
                 subgroup = lesson['groups'][0] if lesson['groups'] and lesson['groups'][0] != "все" else ""
                 emoji = get_emoji(lesson['type'])
+                lesson_type_short = {"лекция": "лек", "практика": "пр", "лабораторная": "лаб"}.get(lesson['type'], lesson['type'][:3])
                 if subgroup:
-                    subject_parts.append(f"{emoji} {lesson['subject']} ({subgroup})")
+                    subject_parts.append(f"{emoji} {lesson['subject'].title()} ({lesson_type_short}, {subgroup})")
                 else:
-                    subject_parts.append(f"{emoji} {lesson['subject']}")
+                    subject_parts.append(f"{emoji} {lesson['subject'].title()} ({lesson_type_short})")
                 teacher_parts.append(lesson['teacher'])
                 room_parts.append(lesson['room'])
             
@@ -192,9 +194,9 @@ async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_msg_id = manager.get_last_message(update.effective_chat.id, update.effective_user.id)
     if last_msg_id:
         try:
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=last_msg_id)
-        except:
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=last_msg_id)        except:
             pass
+
 def with_cleanup(handler):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cleanup(update, context)
@@ -241,8 +243,8 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = datetime.date.today()
         while get_day_name(target) != day:
             target += datetime.timedelta(days=1)
-        msg = await update.message.reply_text(format_schedule(day, get_week_type(target), target))
-    ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+        msg = await update.message.reply_text(format_schedule(day, get_week_type(target), target))    ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+
 @with_cleanup
 async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.date.today()
@@ -263,12 +265,14 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if len(group) == 1:
                     lesson = group[0]
                     subgroup = f" ({lesson['groups'][0]})" if lesson['groups'] and lesson['groups'][0] != "все" else ""
-                    text += f"  ⏰ {time_slot} – {lesson['subject']}{subgroup}\n"
+                    lesson_type_short = {"лекция": "лек", "практика": "пр", "лабораторная": "лаб"}.get(lesson['type'], lesson['type'][:3])
+                    text += f"  ⏰ {time_slot} – {lesson['subject']} ({lesson_type_short}){subgroup}\n"
                 else:
                     subjects = []
                     for lesson in group:
                         subgroup = f" ({lesson['groups'][0]})" if lesson['groups'] and lesson['groups'][0] != "все" else ""
-                        subjects.append(f"{lesson['subject']}{subgroup}")
+                        lesson_type_short = {"лекция": "лек", "практика": "пр", "лабораторная": "лаб"}.get(lesson['type'], lesson['type'][:3])
+                        subjects.append(f"{lesson['subject']} ({lesson_type_short}){subgroup}")
                     text += f"  ⏰ {time_slot} – {' / '.join(subjects)}\n"
             text += "\n"
         else:
@@ -288,13 +292,11 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
-    app.add_handler(CommandHandler("tomorrow", tomorrow_cmd))
-    app.add_handler(CommandHandler("day", day_cmd))
+    app.add_handler(CommandHandler("tomorrow", tomorrow_cmd))    app.add_handler(CommandHandler("day", day_cmd))
     app.add_handler(CommandHandler("week", week_cmd))
     app.add_handler(CommandHandler("now", now_cmd))
-    print("✅ Бот запущен!")    
+    print("✅ Бот запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
