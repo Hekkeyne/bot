@@ -194,7 +194,8 @@ async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_msg_id = manager.get_last_message(update.effective_chat.id, update.effective_user.id)
     if last_msg_id:
         try:
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=last_msg_id)        except:
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=last_msg_id)        
+        except:
             pass
 
 def with_cleanup(handler):
@@ -300,3 +301,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
