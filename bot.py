@@ -243,7 +243,8 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await update.message.reply_text(format_schedule(day, get_week_type(target), target))
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
-@with_cleanupasync def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@with_cleanupasync 
+def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.date.today()
     week_type = get_week_type(today)
     text = "📅 Расписание на неделю\n\n"
@@ -304,3 +305,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
