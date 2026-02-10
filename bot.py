@@ -292,7 +292,9 @@ def main():
     app.add_handler(CommandHandler("day", day_cmd))
     app.add_handler(CommandHandler("week", week_cmd))
     app.add_handler(CommandHandler("now", now_cmd))
-    print("✅ Бот запущен!")    app.run_polling()
+    print("✅ Бот запущен!")    
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
+
