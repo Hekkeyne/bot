@@ -1,10 +1,9 @@
 import sqlite3
 import datetime
 import logging
-import asyncio
+from collections import defaultdict
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram import Update
-from telegram.error import BadRequest
 
 BOT_TOKEN = "6086143518:AAHQhYYXttkZPxQ2J9HNmS7CoFicTjPn7-4"
 
@@ -47,8 +46,8 @@ SCHEDULE = {
         ],
         "sunday": []
     },
-    "even": {        "monday": [],
-        "tuesday": [
+    "even": {
+        "monday": [],        "tuesday": [
             {"time": "08:00-09:30", "subject": "ИНСТРУМЕНТАРИЙ ПРИНЯТИЯ РЕШЕНИЙ", "type": "лабораторная", "teacher": "Шкаберина Г. Ш.", "room": "корп. \"Ал\" каб. \"213\"", "groups": ["2 подгруппа"]},
             {"time": "09:40-11:10", "subject": "ПРОЕКТИРОВАНИЕ ЧЕЛОВЕКО-МАШИННОГО ИНТЕРФЕЙСА", "type": "лабораторная", "teacher": "Гриценко Е. М.", "room": "корп. \"Ал\" каб. \"109\"", "groups": ["2 подгруппа"]},
             {"time": "09:40-11:10", "subject": "ИНСТРУМЕНТАРИЙ ПРИНЯТИЯ РЕШЕНИЙ", "type": "лабораторная", "teacher": "Шкаберина Г. Ш.", "room": "корп. \"Ал\" каб. \"213\"", "groups": ["1 подгруппа"]},
@@ -96,8 +95,8 @@ class ScheduleManager:
                     message_id INTEGER,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
-            ''')    
-    def save_message(self, chat_id, user_id, message_id):
+            ''')
+        def save_message(self, chat_id, user_id, message_id):
         with sqlite3.connect("schedule_bot.db") as conn:
             conn.execute('DELETE FROM bot_messages WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
             conn.execute('INSERT INTO bot_messages (chat_id, user_id, message_id) VALUES (?, ?, ?)', (chat_id, user_id, message_id))
@@ -138,16 +137,15 @@ def format_schedule(day_name, week_type, date):
     if not lessons:
         return f"📅 Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n\n🎉 Выходной! Пар нет."
 
-    from collections import defaultdict
     time_groups = defaultdict(list)
     for lesson in lessons:
         time_groups[lesson["time"]].append(lesson)
 
     msg = f"📅 Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n"
     msg += f"📊 Неделя: {'1-я' if week_type == 'even' else '2-я'}\n\n"
+
     for i, (time_slot, group) in enumerate(sorted(time_groups.items()), 1):
-        subjects = {lesson["subject"] for lesson in group}
-        if len(subjects) == 1:
+        subjects = {lesson["subject"] for lesson in group}        if len(subjects) == 1:
             subject = next(iter(subjects))
             lesson_type = group[0]["type"]
             teachers = {lesson["teacher"] for lesson in group}
@@ -175,7 +173,6 @@ def format_schedule(day_name, week_type, date):
             msg += f"   👨‍🏫 {', '.join(sorted(teachers))}\n"
             msg += f"   🏫 {', '.join(sorted(rooms))}\n\n"
         else:
-            # Разные предметы в одно время — выводим как есть
             for j, lesson in enumerate(group, 1):
                 msg += f"{i}.{j} ⏰ {lesson['time']} - {lesson['subject']}\n"
                 msg += f"      {get_emoji(lesson['type'])} {lesson['type'].upper()}\n"
@@ -192,12 +189,12 @@ async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if last_msg_id:
         try:
             await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=last_msg_id)
-        except:
+        except Exception:
             pass
+
 def with_cleanup(handler):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await cleanup(update, context)
-        return await handler(update, context)
+        await cleanup(update, context)        return await handler(update, context)
     return wrapper
 
 @with_cleanup
@@ -243,11 +240,10 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = await update.message.reply_text(format_schedule(day, get_week_type(target), target))
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
-@with_cleanupasync 
-def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+@with_cleanup
+async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.date.today()
-    week_type = get_week_type(today)
-    text = "📅 Расписание на неделю\n\n"
+    week_type = get_week_type(today)    text = "📅 Расписание на неделю\n\n"
     for eng in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
         lessons = SCHEDULE[week_type].get(eng, [])
         ru = get_russian_day(eng)
@@ -293,18 +289,5 @@ async def now_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 def main():
-    logging.basicConfig(level=logging.INFO)    
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("today", today_cmd))
-    app.add_handler(CommandHandler("tomorrow", tomorrow_cmd))
-    app.add_handler(CommandHandler("day", day_cmd))
-    app.add_handler(CommandHandler("week", week_cmd))
-    app.add_handler(CommandHandler("now", now_cmd))
-    print("✅ Бот запущен!")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
-
-
+    logging.basicConfig(level=logging.INFO)
+    app = Application
