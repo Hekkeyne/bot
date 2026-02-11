@@ -235,7 +235,7 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for eng in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
         lessons = SCHEDULE[week_type].get(eng, [])
         ru = get_russian_day(eng)
-        if lessons
+        if lessons:
             time_groups = {}            
             for lesson in lessons:
                 time_groups.setdefault(lesson['time'], []).append(lesson)
@@ -278,4 +278,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
