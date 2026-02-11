@@ -82,7 +82,6 @@ SCHEDULE = {
 class ScheduleManager:
     def __init__(self):
         self.init_db()
-    
     def init_db(self):
         with sqlite3.connect("schedule_bot.db") as conn:
             conn.execute('''
@@ -90,15 +89,14 @@ class ScheduleManager:
                     id INTEGER PRIMARY KEY,
                     chat_id INTEGER,
                     user_id INTEGER,
-                    message_id INTEGER,                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    message_id INTEGER,                    
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-    
     def save_message(self, chat_id, user_id, message_id):
         with sqlite3.connect("schedule_bot.db") as conn:
             conn.execute('DELETE FROM bot_messages WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
             conn.execute('INSERT INTO bot_messages (chat_id, user_id, message_id) VALUES (?, ?, ?)', (chat_id, user_id, message_id))
-    
     def get_last_message(self, chat_id, user_id):
         with sqlite3.connect("schedule_bot.db") as conn:
             cur = conn.execute(
@@ -107,69 +105,59 @@ class ScheduleManager:
             )
             row = cur.fetchone()
             return row[0] if row else None
-
-# === Вспомогательные функции ===
 def get_week_type(date=None):
     if date is None:
         date = datetime.date.today()
     return "even" if date.isocalendar()[1] % 2 == 0 else "odd"
-
 def get_tomorrow():
     return datetime.date.today() + datetime.timedelta(days=1)
-
 def get_day_name(date):
     days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
     return days[date.weekday()]
-
 def get_russian_day(eng):
     mapping = {
         "monday": "Понедельник", "tuesday": "Вторник", "wednesday": "Среда",
         "thursday": "Четверг", "friday": "Пятница", "saturday": "Суббота", "sunday": "Воскресенье"
     }
     return mapping.get(eng, eng)
-
 def get_emoji(lesson_type):
     return {"лекция": "📚", "практика": "✏️", "лабораторная": "🔬"}.get(lesson_type, "📖")
-
 def format_schedule(day_name, week_type, date):
     lessons = SCHEDULE[week_type].get(day_name, [])
     if not lessons:
         return f"📅 Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n\n🎉 Выходной! Пар нет."
-
-    # Группировка занятий по времени
     time_groups = {}
     for lesson in lessons:
         time_groups.setdefault(lesson['time'], []).append(lesson)    
-    # Сортировка временных слотов
     sorted_times = sorted(time_groups.keys(), key=lambda t: t.split('-')[0])
-
     msg = f"📅 Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n"
     msg += f"📊 Неделя: {'1-я' if week_type == 'even' else '2-я'}\n\n"
-
     for idx, time_slot in enumerate(sorted_times, 1):
         group = time_groups[time_slot]
-        
-        msg += f"{idx}. ⏰ {time_slot}\n"
+        all_groups_lesson = None
         for lesson in group:
-            # Форматирование подгруппы
             if lesson['groups'][0] == "все":
-                group_display = "Все группы"
-            else:
-                group_display = lesson['groups'][0]
-            
-            # Тип занятия заглавными буквами
-            lesson_type_upper = lesson['type'].upper()
-            
-            # Форматирование аудитории: замена двойных кавычек на одинарные для единообразия
-            room_formatted = lesson['room'].replace('"', "'")
-            
-            msg += f"   {get_emoji(lesson['type'])} {lesson_type_upper}\n"
-            msg += f"   👥 {group_display}: {lesson['subject']} - {lesson['teacher']} - {room_formatted}\n"
-        msg += "\n"
-    
+                all_groups_lesson = lesson
+                break
+        msg += f"{idx}. ⏰ {time_slot}\n"
+        if all_groups_lesson:
+            room_formatted = all_groups_lesson['room'].replace('"', "'")
+            msg += f"   {all_groups_lesson['subject']}\n"
+            msg += f"   {get_emoji(all_groups_lesson['type'])} {all_groups_lesson['type'].upper()}\n"
+            msg += f"   👨‍🏫 {all_groups_lesson['teacher']}\n"
+            msg += f"   🏫 {room_formatted}\n\n"
+        else:
+            for i, lesson in enumerate(group):
+                if i > 0:
+                    msg += "\n" 
+                room_formatted = lesson['room'].replace('"', "'")
+                msg += f"   👥 {lesson['groups'][0]}:\n"
+                msg += f"   {lesson['subject']}\n"
+                msg += f"   {get_emoji(lesson['type'])} {lesson['type'].upper()}\n"
+                msg += f"   👨‍🏫 {lesson['teacher']}\n"
+                msg += f"   🏫 {room_formatted}\n"
+            msg += "\n"
     return msg.strip()
-
-# === Обработчики команд ===
 async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manager = ScheduleManager()
     last_msg_id = manager.get_last_message(update.effective_chat.id, update.effective_user.id)
@@ -178,17 +166,16 @@ async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=last_msg_id)
         except:
             pass
-
 def with_cleanup(handler):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cleanup(update, context)
         return await handler(update, context)
     return wrapper
-
 @with_cleanup
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🤖 Бот расписания\n\n"        "Команды:\n"
+        "🤖 Бот расписания\n\n"
+        "Команды:\n"
         "/today — сегодня\n"
         "/tomorrow — завтра\n"
         "/week — вся неделя\n"
@@ -197,19 +184,16 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     msg = await update.message.reply_text(text)
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
-
 @with_cleanup
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.date.today()
     msg = await update.message.reply_text(format_schedule(get_day_name(today), get_week_type(today), today))
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
-
 @with_cleanup
 async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tmr = get_tomorrow()
     msg = await update.message.reply_text(format_schedule(get_day_name(tmr), get_week_type(tmr), tmr))
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
-
 @with_cleanup
 async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mapping = {
@@ -226,7 +210,6 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target += datetime.timedelta(days=1)
         msg = await update.message.reply_text(format_schedule(day, get_week_type(target), target))
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
-
 @with_cleanup
 async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.date.today()
@@ -236,34 +219,28 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lessons = SCHEDULE[week_type].get(eng, [])
         ru = get_russian_day(eng)
         if lessons:
-            time_groups = {}            
+            time_groups = {}
             for lesson in lessons:
                 time_groups.setdefault(lesson['time'], []).append(lesson)
-            
             text += f"**{ru}**:\n"
             for time_slot in sorted(time_groups.keys(), key=lambda t: t.split('-')[0]):
                 group = time_groups[time_slot]
-                for lesson in group:
-                    if lesson['groups'][0] == "все":
-                        group_display = "Все группы"
-                    else:
-                        group_display = lesson['groups'][0]
-                    lesson_type_upper = lesson['type'].upper()
-                    room_formatted = lesson['room'].replace('"', "'")
-                    text += f"  ⏰ {time_slot} | {lesson_type_upper} | {group_display}: {lesson['subject']} - {lesson['teacher']} - {room_formatted}\n"
+                all_groups_lesson = next((l for l in group if l['groups'][0] == "все"), None)
+                if all_groups_lesson:
+                    text += f"  ⏰ {time_slot} | {all_groups_lesson['subject']} ({all_groups_lesson['type'].upper()})\n"
+                else:
+                    for lesson in group:
+                        text += f"  ⏰ {time_slot} | {lesson['groups'][0]}: {lesson['subject']} ({lesson['type'].upper()})\n"
             text += "\n"
         else:
             text += f"**{ru}**: 🎉 Выходной\n\n"
     text += f"📊 Неделя: {'1-я' if week_type == 'even' else '2-я'}"
     msg = await update.message.reply_text(text, parse_mode='Markdown')
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
-
 @with_cleanup
 async def now_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("✅ Бот работает!")
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
-
-# === Запуск ===
 def main():
     logging.basicConfig(level=logging.INFO)
     app = Application.builder().token(BOT_TOKEN).build()
@@ -276,7 +253,4 @@ def main():
     print("✅ Бот запущен!")
     app.run_polling()
 
-if __name__ == "__main__":
-    main()
-
-
+if __name__ == "__main__":    main()
