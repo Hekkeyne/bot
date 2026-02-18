@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.error import BadRequest
 BOT_TOKEN = "6086143518:AAHQhYYXttkZPxQ2J9HNmS7CoFicTjPn7-4"
 SCHEDULE = {
-  "even": {
+  "odd": {
     "monday": [],
     "tuesday": [
       {
@@ -240,7 +240,7 @@ SCHEDULE = {
     "saturday": [],
     "sunday": []
   },
-  "odd": {
+  "even": {
     "monday": [],
     "tuesday": [
       {
@@ -660,4 +660,5 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":    main()
+
 
