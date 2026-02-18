@@ -514,7 +514,7 @@ class ScheduleManager:
 def get_week_type(date=None):
     if date is None:
         date = datetime.date.today()
-    return "even" if date.isocalendar()[1] % 2 == 0 else "odd"
+    return "odd" if date.isocalendar()[1] % 2 == 0 else "even"
 def get_tomorrow():
     return datetime.date.today() + datetime.timedelta(days=1)
 def get_day_name(date):
@@ -660,5 +660,6 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":    main()
+
 
 
