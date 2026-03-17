@@ -609,7 +609,7 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     arg = " ".join(context.args).lower()
     day = mapping.get(arg)
     if not day:
-        msg = await update.message.reply_text("❌ Укажите день: /day понедельник")
+        msg = await update.message.reply_text("Укажите день: /day понедельник")
     else:
         target = datetime.date.today()
         while get_day_name(target) != day:
@@ -645,7 +645,7 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 @with_cleanup
 async def now_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("✅ Бот работает!")
+    msg = await update.message.reply_text("Бот работает!")
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 def main():
     logging.basicConfig(level=logging.INFO)
@@ -656,7 +656,7 @@ def main():
     app.add_handler(CommandHandler("day", day_cmd))
     app.add_handler(CommandHandler("week", week_cmd))
     app.add_handler(CommandHandler("now", now_cmd))
-    print("✅ Бот запущен!")
+    print("Бот запущен!")
     app.run_polling()
 
 if __name__ == "__main__":    main()
