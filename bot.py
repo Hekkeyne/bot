@@ -11,7 +11,7 @@ FULL_SCHEDULE_LINK = "https://timetable.pallada.sibsau.ru/timetable/group/13922"
 FOOTER_LINK = f'\n\n<a href="{FULL_SCHEDULE_LINK}">Полное расписание на сайте</a>'
 
 SCHEDULE = {
-  "even": {
+  "odd": {
     "monday": [],
     "tuesday": [
       {
@@ -244,7 +244,7 @@ SCHEDULE = {
     "saturday": [],
     "sunday": []
   },
-  "odd": {
+  "even": {
     "monday": [],
     "tuesday": [
       {
