@@ -1,4 +1,4 @@
-# main.py
+
 import sqlite3
 import datetime
 import logging
@@ -7,13 +7,11 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram import Update
 from telegram.error import BadRequest, Forbidden
 import pytz
-
-# ⚠️ Храните токен в переменных окружения!
 BOT_TOKEN = "6086143518:AAHQhYYXttkZPxQ2J9HNmS7CoFicTjPn7-4"
 FULL_SCHEDULE_LINK = "https://timetable.pallada.sibsau.ru/timetable/group/13922"
 FOOTER_LINK = f'\n\n<a href="{FULL_SCHEDULE_LINK}">Полное расписание на сайте</a>'
 
-KRASNOYARSK_TZ = pytz.timezone('Asia/Krasnoyarsk')  # UTC+7
+KRASNOYARSK_TZ = pytz.timezone('Asia/Krasnoyarsk')  
 
 SCHEDULE = {
   "odd": {
