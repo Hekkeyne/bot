@@ -538,7 +538,7 @@ def with_cleanup(handler):
 @with_cleanup
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🤖 Бот расписания\n\n"
+        "Бот расписания\n\n"
         "Команды:\n"
         "/today — сегодня\n"
         "/tomorrow — завтра\n"
