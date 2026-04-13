@@ -1,4 +1,3 @@
-
 import sqlite3
 import datetime
 import logging
@@ -400,12 +399,9 @@ SCHEDULE = {
     "sunday": []
   }
 }
-
-
 class ScheduleManager:
     def __init__(self):
         self.init_db()
-
     def init_db(self):
         with sqlite3.connect("schedule_bot.db") as conn:
             conn.execute('''
@@ -425,13 +421,11 @@ class ScheduleManager:
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-
     def save_message(self, chat_id, user_id, message_id):
         with sqlite3.connect("schedule_bot.db") as conn:
             conn.execute('DELETE FROM bot_messages WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
             conn.execute('INSERT INTO bot_messages (chat_id, user_id, message_id) VALUES (?, ?, ?)', 
                         (chat_id, user_id, message_id))
-
     def get_last_message(self, chat_id, user_id):
         with sqlite3.connect("schedule_bot.db") as conn:
             cur = conn.execute(
@@ -440,18 +434,15 @@ class ScheduleManager:
             )
             row = cur.fetchone()
             return row[0] if row else None
-
     def set_auto_chat(self, user_id, chat_id):
         with sqlite3.connect("schedule_bot.db") as conn:
             conn.execute('''
                 INSERT OR REPLACE INTO user_settings (user_id, auto_chat_id, auto_enabled)
                 VALUES (?, ?, 1)
             ''', (user_id, chat_id))
-
     def disable_auto(self, user_id):
         with sqlite3.connect("schedule_bot.db") as conn:
             conn.execute('UPDATE user_settings SET auto_enabled = 0 WHERE user_id = ?', (user_id,))
-
     def get_auto_chat(self, user_id):
         with sqlite3.connect("schedule_bot.db") as conn:
             cur = conn.execute(
@@ -460,38 +451,27 @@ class ScheduleManager:
             )
             row = cur.fetchone()
             return (row[0], bool(row[1])) if row else (None, False)
-
     def get_all_auto_chats(self):
         with sqlite3.connect("schedule_bot.db") as conn:
             cur = conn.execute(
                 'SELECT user_id, auto_chat_id FROM user_settings WHERE auto_enabled = 1'
             )
             return cur.fetchall()
-
-
 def get_week_type(date=None):
     if date is None:
         date = datetime.date.today()
     return "even" if date.isocalendar()[1] % 2 == 0 else "odd"
-
-
 def get_day_name(date):
     days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
     return days[date.weekday()]
-
-
 def get_russian_day(eng):
     mapping = {
         "monday": "Понедельник", "tuesday": "Вторник", "wednesday": "Среда",
         "thursday": "Четверг", "friday": "Пятница", "saturday": "Суббота", "sunday": "Воскресенье"
     }
     return mapping.get(eng, eng)
-
-
 def get_emoji(lesson_type):
     return {"лекция": "📚", "практика": "✏️", "лабораторная": "🔬"}.get(lesson_type, "📖")
-
-
 def get_last_lesson_end_time(day_name, week_type):
     """Возвращает время окончания последней пары как (hour, minute) или None"""
     lessons = SCHEDULE[week_type].get(day_name, [])
@@ -506,21 +486,16 @@ def get_last_lesson_end_time(day_name, week_type):
         except (IndexError, ValueError):
             continue
     return max(end_times) if end_times else None
-
-
 def format_schedule(day_name, week_type, date):
     lessons = SCHEDULE[week_type].get(day_name, [])
     if not lessons:
         return f"📅 Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n\n🎉 Выходной! Пар нет." + FOOTER_LINK
-    
     time_groups = {}
     for lesson in lessons:
         time_groups.setdefault(lesson['time'], []).append(lesson)    
-    
     sorted_times = sorted(time_groups.keys(), key=lambda t: t.split('-')[0])
     msg = f"📅 Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n"
     msg += f"📊 Неделя: {'1-я' if week_type == 'even' else '2-я'}\n\n"
-    
     for idx, time_slot in enumerate(sorted_times, 1):
         group = time_groups[time_slot]
         all_groups_lesson = None
@@ -528,7 +503,6 @@ def format_schedule(day_name, week_type, date):
             if lesson['groups'][0] == "все":
                 all_groups_lesson = lesson
                 break
-        
         msg += f"{idx}. ⏰ {time_slot}\n"
         if all_groups_lesson:
             room_formatted = all_groups_lesson['room'].replace('"', "'")
@@ -547,10 +521,7 @@ def format_schedule(day_name, week_type, date):
                 msg += f"   👨‍🏫 {lesson['teacher']}\n"
                 msg += f"   🏫 {room_formatted}\n"
             msg += "\n"
-    
     return msg.strip() + FOOTER_LINK
-
-
 async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manager = ScheduleManager()
     last_msg_id = manager.get_last_message(update.effective_chat.id, update.effective_user.id)
@@ -559,15 +530,11 @@ async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=last_msg_id)
         except:
             pass
-
-
 def with_cleanup(handler):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cleanup(update, context)
         return await handler(update, context)
     return wrapper
-
-
 @with_cleanup
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -583,8 +550,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     msg = await update.message.reply_text(text, parse_mode='HTML')
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
-
-
 @with_cleanup
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.date.today()
@@ -593,8 +558,6 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML'
     )
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
-
-
 @with_cleanup
 async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tmr = datetime.date.today() + datetime.timedelta(days=1)
@@ -603,8 +566,6 @@ async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML'
     )
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
-
-
 @with_cleanup
 async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mapping = {
@@ -660,7 +621,6 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Настройка чата для автоотправки: /setchat [chat_id]"""
     user_id = update.effective_user.id
     manager = ScheduleManager()
-    
     if update.effective_chat.type == "private":
         target_chat_id = update.effective_chat.id
         if context.args and context.args[0].lstrip('-').isdigit():
@@ -668,9 +628,9 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         if not context.args or not context.args[0].lstrip('-').isdigit():
             msg = await update.message.reply_text(
-                "🔧 Настройка автоотправки:\n"
-                "• В ЛС: просто <code>/setchat</code>\n"
-                "• В группе: <code>/setchat &lt;chat_id&gt;</code>\n"
+                "Настройка автоотправки:\n"
+                "В ЛС: просто <code>/setchat</code>\n"
+                "В группе: <code>/setchat &lt;chat_id&gt;</code>\n"
                 "ID чата можно узнать через @getidsbot" + FOOTER_LINK,
                 parse_mode='HTML'
             )
@@ -679,10 +639,10 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_chat_id = int(context.args[0])
     manager.set_auto_chat(user_id, target_chat_id)
     msg = await update.message.reply_text(
-        f"✅ Автоотправка настроена!\n"
-        f"📨 Чат: <code>{target_chat_id}</code>\n"
-        f"⏰ Отправка: сразу после последней пары по Красноярску (UTC+7)\n"
-        f"🔕 Отключить: <code>/disable_auto</code>" + FOOTER_LINK,
+        f"Автоотправка настроена!\n"
+        f"Чат: <code>{target_chat_id}</code>\n"
+        f"Отправка: сразу после последней пары по Красноярску (UTC+7)\n"
+        f"Отключить: <code>/disable_auto</code>" + FOOTER_LINK,
         parse_mode='HTML'
     )
     manager.save_message(update.effective_chat.id, user_id, msg.message_id)
@@ -691,13 +651,13 @@ async def disable_auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     ScheduleManager().disable_auto(user_id)
     msg = await update.message.reply_text(
-        "🔕 Автоотправка отключена." + FOOTER_LINK,
+        "Автоотправка отключена." + FOOTER_LINK,
         parse_mode='HTML'
     )
     ScheduleManager().save_message(update.effective_chat.id, user_id, msg.message_id)
 @with_cleanup
 async def now_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("🤖 Бот работает!" + FOOTER_LINK, parse_mode='HTML')
+    msg = await update.message.reply_text("Бот воркает" + FOOTER_LINK, parse_mode='HTML')
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 async def send_tomorrow_schedule(bot, chat_id, week_type_tomorrow):
     """Отправляет расписание на завтра в указанный чат"""
@@ -724,28 +684,27 @@ async def schedule_auto_send(app: Application):
         logging.info(f"⏭ Время отправки сегодня ({trigger_time}) уже прошло")
         return
     seconds_to_wait = (trigger_time - now_krasnoyarsk).total_seconds()
-    logging.info(f"⏰ Автоотправка запланирована через {seconds_to_wait/60:.1f} мин (в {trigger_time.strftime('%H:%M')})")
+    logging.info(f"Автоотправка запланирована через {seconds_to_wait/60:.1f} мин (в {trigger_time.strftime('%H:%M')})")
     await asyncio.sleep(seconds_to_wait)
     if datetime.datetime.now(KRASNOYARSK_TZ).date() != today:
-        logging.warning("🔄 Дата изменилась во время ожидания, пропускаем отправку")
+        logging.warning("Дата изменилась во время ожидания, пропускаем отправку")
         return
     manager = ScheduleManager()
     sent_count = 0
-    
     for user_id, target_chat_id in manager.get_all_auto_chats():
         try:
             await send_tomorrow_schedule(app.bot, target_chat_id, tomorrow_week)
-            logging.info(f"✅ Отправлено пользователю {user_id} в чат {target_chat_id}")
+            logging.info(f"Отправлено пользователю {user_id} в чат {target_chat_id}")
             sent_count += 1
         except Forbidden:
-            logging.warning(f"🚫 Бот заблокирован в чате {target_chat_id}, отключаем автоотправку для {user_id}")
+            logging.warning(f"Бот заблокирован в чате {target_chat_id}, отключаем автоотправку для {user_id}")
             manager.disable_auto(user_id)
         except BadRequest as e:
-            logging.warning(f"⚠️ Ошибка отправки в чат {target_chat_id}: {e}")
+            logging.warning(f"Ошибка отправки в чат {target_chat_id}: {e}")
         except Exception as e:
-            logging.error(f"❌ Неожиданная ошибка: {type(e).__name__}: {e}")
+            logging.error(f"Неожиданная ошибка: {type(e).__name__}: {e}")
     if sent_count > 0:
-        logging.info(f"🎯 Всего отправлено: {sent_count}")
+        logging.info(f"Всего отправлено: {sent_count}")
 async def auto_send_loop(application: Application):
     while True:
         try:
@@ -753,28 +712,26 @@ async def auto_send_loop(application: Application):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logging.error(f"💥 Ошибка в цикле автоотправки: {e}")
+            logging.error(f"Ошибка в цикле автоотправки: {e}")
         now = datetime.datetime.now(KRASNOYARSK_TZ)
         next_day = now.date() + datetime.timedelta(days=1)
         next_check = KRASNOYARSK_TZ.localize(
             datetime.datetime.combine(next_day, datetime.time(0, 1))
         )
         sleep_seconds = (next_check - datetime.datetime.now(KRASNOYARSK_TZ)).total_seconds()
-        logging.info(f"😴 Следующая проверка через {sleep_seconds/3600:.1f} часов")
-        await asyncio.sleep(max(60, sleep_seconds))  # минимум 1 минута
+        logging.info(f"Следующая проверка через {sleep_seconds/3600:.1f} часов")
+        await asyncio.sleep(max(60, sleep_seconds)) 
 async def post_init(application: Application):
     """Запускает фоновый цикл автоотправки после инициализации бота"""
     asyncio.create_task(auto_send_loop(application))
-    logging.info("🔄 Цикл автоотправки запущен")
+    logging.info("Цикл автоотправки запущен")
 def main():
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
         handlers=[logging.StreamHandler()]
     )
-    
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("tomorrow", tomorrow_cmd))
@@ -783,10 +740,7 @@ def main():
     app.add_handler(CommandHandler("setchat", setchat_cmd))
     app.add_handler(CommandHandler("disable_auto", disable_auto_cmd))
     app.add_handler(CommandHandler("now", now_cmd))
-    
-    print("🤖 Бот запущен! Автоотправка активна (часовой пояс: Красноярск, UTC+7)")
+    print("Бот запущен!")
     app.run_polling()
-
-
 if __name__ == "__main__":
     main()
