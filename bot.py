@@ -422,6 +422,7 @@ class ScheduleManager:
                 CREATE TABLE IF NOT EXISTS user_settings (
                     user_id INTEGER PRIMARY KEY,
                     auto_chat_id INTEGER,
+                    message_thread_id INTEGER,
                     auto_enabled BOOLEAN DEFAULT 1,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
@@ -442,12 +443,12 @@ class ScheduleManager:
             row = cur.fetchone()
             return row[0] if row else None
 
-    def set_auto_chat(self, user_id, chat_id):
+    def set_auto_chat(self, user_id, chat_id, thread_id=None):
         with sqlite3.connect("schedule_bot.db") as conn:
             conn.execute('''
-                INSERT OR REPLACE INTO user_settings (user_id, auto_chat_id, auto_enabled)
-                VALUES (?, ?, 1)
-            ''', (user_id, chat_id))
+                INSERT OR REPLACE INTO user_settings (user_id, auto_chat_id, message_thread_id, auto_enabled)
+                VALUES (?, ?, ?, 1)
+            ''', (user_id, chat_id, thread_id))
 
     def disable_auto(self, user_id):
         with sqlite3.connect("schedule_bot.db") as conn:
@@ -456,16 +457,18 @@ class ScheduleManager:
     def get_auto_chat(self, user_id):
         with sqlite3.connect("schedule_bot.db") as conn:
             cur = conn.execute(
-                'SELECT auto_chat_id, auto_enabled FROM user_settings WHERE user_id = ?',
+                'SELECT auto_chat_id, message_thread_id, auto_enabled FROM user_settings WHERE user_id = ?',
                 (user_id,)
             )
             row = cur.fetchone()
-            return (row[0], bool(row[1])) if row else (None, False)
+            if row:
+                return (row[0], row[1], bool(row[2]))
+            return (None, None, False)
 
     def get_all_auto_chats(self):
         with sqlite3.connect("schedule_bot.db") as conn:
             cur = conn.execute(
-                'SELECT user_id, auto_chat_id FROM user_settings WHERE auto_enabled = 1'
+                'SELECT user_id, auto_chat_id, message_thread_id FROM user_settings WHERE auto_enabled = 1'
             )
             return cur.fetchall()
 
@@ -583,8 +586,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/tomorrow — завтра\n"
         "/week — вся неделя\n"
         "/day <день> — конкретный день (напр. /day вторник)\n"
-        "/setchat — настроить автоотправку после последней пары\n"
-        "/disable_auto — отключить автоотправку"
+        "/setchat [chat_id] [thread_id] — настроить автоотправку после последней пары\n"
+        "/disable_auto — отключить автоотправку\n\n"
+        "💡 <b>Примеры:</b>\n"
+        "<code>/setchat</code> — в ЛС (отправка в этот чат)\n"
+        "<code>/setchat -1001234567890</code> — в группу\n"
+        "<code>/setchat -1001234567890 42</code> — в топик группы"
         + FOOTER_LINK
     )
     msg = await update.message.reply_text(text, parse_mode='HTML')
@@ -673,31 +680,58 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @with_cleanup
 async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Настройка чата для автоотправки: /setchat [chat_id]"""
+    """Настройка чата для автоотправки: /setchat [chat_id] [thread_id]"""
     user_id = update.effective_user.id
     manager = ScheduleManager()
     
-    if update.effective_chat.type == "private":
-        target_chat_id = update.effective_chat.id
-        if context.args and context.args[0].lstrip('-').isdigit():
-            target_chat_id = int(context.args[0])
-    else:
-        if not context.args or not context.args[0].lstrip('-').isdigit():
-            msg = await update.message.reply_text(
-                "⚙️ <b>Настройка автоотправки:</b>\n\n"
-                "В ЛС: просто <code>/setchat</code>\n"
-                "В группе: <code>/setchat &lt;chat_id&gt;</code>\n\n"
-                "💡 ID чата можно узнать через @getidsbot" + FOOTER_LINK,
-                parse_mode='HTML'
-            )
-            manager.save_message(update.effective_chat.id, user_id, msg.message_id)
-            return
-        target_chat_id = int(context.args[0])
+    target_chat_id = None
+    target_thread_id = None
     
-    manager.set_auto_chat(user_id, target_chat_id)
+    if update.effective_chat.type == "private":
+        # В ЛС
+        if context.args:
+            if len(context.args) >= 1 and context.args[0].lstrip('-').isdigit():
+                target_chat_id = int(context.args[0])
+            if len(context.args) >= 2 and context.args[1].isdigit():
+                target_thread_id = int(context.args[1])
+        
+        if not target_chat_id:
+            target_chat_id = update.effective_chat.id
+    else:
+        # В группе/супергруппе
+        if not context.args:
+            # Без аргументов — используем текущий чат и топик (если есть)
+            target_chat_id = update.effective_chat.id
+            if update.message.is_topic_message:
+                target_thread_id = update.message.message_thread_id
+        else:
+            # С аргументами
+            if context.args[0].lstrip('-').isdigit():
+                target_chat_id = int(context.args[0])
+            if len(context.args) >= 2 and context.args[1].isdigit():
+                target_thread_id = int(context.args[1])
+            
+            if not target_chat_id:
+                msg = await update.message.reply_text(
+                    "⚙️ <b>Настройка автоотправки:</b>\n\n"
+                    "В ЛС: просто <code>/setchat</code>\n"
+                    "В группе: <code>/setchat &lt;chat_id&gt;</code>\n"
+                    "В топик: <code>/setchat &lt;chat_id&gt; &lt;thread_id&gt;</code>\n\n"
+                    "💡 ID чата можно узнать через @getidsbot\n"
+                    "💡 Thread ID — это ID топика в группе" + FOOTER_LINK,
+                    parse_mode='HTML'
+                )
+                manager.save_message(update.effective_chat.id, user_id, msg.message_id)
+                return
+    
+    manager.set_auto_chat(user_id, target_chat_id, target_thread_id)
+    
+    thread_info = f"\n📌 Топик: <code>{target_thread_id}</code>" if target_thread_id else "\n📌 Чат (без топика)"
+    
     msg = await update.message.reply_text(
         f"✅ <b>Автоотправка настроена!</b>\n\n"
-        f"📩 Чат: <code>{target_chat_id}</code>\n"
+        f"📩 Чат: <code>{target_chat_id}</code>"
+        f"{thread_info}\n"
         f"⏰ Отправка: сразу после последней пары по Красноярску (UTC+7)\n"
         f"❌ Отключить: <code>/disable_auto</code>" + FOOTER_LINK,
         parse_mode='HTML'
@@ -710,7 +744,7 @@ async def disable_auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     ScheduleManager().disable_auto(user_id)
     msg = await update.message.reply_text(
-        " Автоотправка отключена." + FOOTER_LINK,
+        "🚫 Автоотправка отключена." + FOOTER_LINK,
         parse_mode='HTML'
     )
     ScheduleManager().save_message(update.effective_chat.id, user_id, msg.message_id)
@@ -722,12 +756,25 @@ async def now_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 
-async def send_tomorrow_schedule(bot, chat_id, week_type_tomorrow):
-    """Отправляет расписание на завтра в указанный чат"""
+async def send_tomorrow_schedule(bot, chat_id, thread_id, week_type_tomorrow):
+    """Отправляет расписание на завтра в указанный чат и топик"""
     tomorrow = datetime.date.today() + datetime.timedelta(days=1)
     day_name = get_day_name(tomorrow)
     schedule_text = format_schedule(day_name, week_type_tomorrow, tomorrow)
-    await bot.send_message(chat_id=chat_id, text=schedule_text, parse_mode='HTML')
+    
+    if thread_id:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=schedule_text,
+            parse_mode='HTML',
+            message_thread_id=thread_id
+        )
+    else:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=schedule_text,
+            parse_mode='HTML'
+        )
 
 
 async def schedule_auto_send(app: Application):
@@ -765,10 +812,11 @@ async def schedule_auto_send(app: Application):
     manager = ScheduleManager()
     sent_count = 0
     
-    for user_id, target_chat_id in manager.get_all_auto_chats():
+    for user_id, target_chat_id, target_thread_id in manager.get_all_auto_chats():
         try:
-            await send_tomorrow_schedule(app.bot, target_chat_id, tomorrow_week)
-            logging.info(f"✅ Отправлено пользователю {user_id} в чат {target_chat_id}")
+            await send_tomorrow_schedule(app.bot, target_chat_id, target_thread_id, tomorrow_week)
+            thread_info = f" (топик {target_thread_id})" if target_thread_id else ""
+            logging.info(f"✅ Отправлено пользователю {user_id} в чат {target_chat_id}{thread_info}")
             sent_count += 1
         except Forbidden:
             logging.warning(f"🚫 Бот заблокирован в чате {target_chat_id}, отключаем автоотправку для {user_id}")
