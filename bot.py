@@ -514,6 +514,52 @@ def get_last_lesson_end_time(day_name, week_type):
     return max(end_times) if end_times else None
 
 
+def find_last_day_with_classes(reference_date):
+    """
+    Ищет последний день с парами, идя назад от reference_date (не включая сам reference_date).
+    Возвращает (date, day_name, week_type) или None если не найдено за 7 дней.
+    """
+    for i in range(1, 8):
+        check_date = reference_date - datetime.timedelta(days=i)
+        day_name = get_day_name(check_date)
+        week_type = get_week_type(check_date)
+        
+        lessons = SCHEDULE[week_type].get(day_name, [])
+        if lessons:
+            return (check_date, day_name, week_type)
+    
+    return None
+
+
+def get_trigger_time_for_today(today_date):
+    """
+    Определяет время триггера для отправки уведомления СЕГОДНЯ.
+    Ищет последний день с парами (сегодня или ранее) и берет время окончания последней пары.
+    Возвращает datetime в часовом поясе Красноярска или None.
+    """
+    now_krasnoyarsk = datetime.datetime.now(KRASNOYARSK_TZ)
+    
+    today_day_name = get_day_name(today_date)
+    today_week_type = get_week_type(today_date)
+    today_lessons = SCHEDULE[today_week_type].get(today_day_name, [])
+    
+    if today_lessons:
+        last_time = get_last_lesson_end_time(today_day_name, today_week_type)
+        if last_time:
+            h, m = last_time
+            return now_krasnoyarsk.replace(hour=h, minute=m, second=0, microsecond=0) + datetime.timedelta(minutes=2)
+    else:
+        result = find_last_day_with_classes(today_date)
+        if result:
+            _, day_name, week_type = result
+            last_time = get_last_lesson_end_time(day_name, week_type)
+            if last_time:
+                h, m = last_time
+                return now_krasnoyarsk.replace(hour=h, minute=m, second=0, microsecond=0) + datetime.timedelta(minutes=2)
+    
+    return None
+
+
 def format_schedule(day_name, week_type, date):
     lessons = SCHEDULE[week_type].get(day_name, [])
     if not lessons:
@@ -680,7 +726,6 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @with_cleanup
 async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Настройка чата для автоотправки: /setchat [chat_id] [thread_id]"""
     user_id = update.effective_user.id
     manager = ScheduleManager()
     
@@ -688,7 +733,6 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_thread_id = None
     
     if update.effective_chat.type == "private":
-        # В ЛС
         if context.args:
             if len(context.args) >= 1 and context.args[0].lstrip('-').isdigit():
                 target_chat_id = int(context.args[0])
@@ -698,14 +742,11 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not target_chat_id:
             target_chat_id = update.effective_chat.id
     else:
-        # В группе/супергруппе
         if not context.args:
-            # Без аргументов — используем текущий чат и топик (если есть)
             target_chat_id = update.effective_chat.id
             if update.message.is_topic_message:
                 target_thread_id = update.message.message_thread_id
         else:
-            # С аргументами
             if context.args[0].lstrip('-').isdigit():
                 target_chat_id = int(context.args[0])
             if len(context.args) >= 2 and context.args[1].isdigit():
@@ -713,12 +754,12 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if not target_chat_id:
                 msg = await update.message.reply_text(
-                    "⚙️ <b>Настройка автоотправки:</b>\n\n"
+                    "<b>Настройка автоотправки:</b>\n\n"
                     "В ЛС: просто <code>/setchat</code>\n"
                     "В группе: <code>/setchat &lt;chat_id&gt;</code>\n"
                     "В топик: <code>/setchat &lt;chat_id&gt; &lt;thread_id&gt;</code>\n\n"
-                    "💡 ID чата можно узнать через @getidsbot\n"
-                    "💡 Thread ID — это ID топика в группе" + FOOTER_LINK,
+                    "ID чата можно узнать через @getidsbot\n"
+                    "Thread ID — это ID топика в группе" + FOOTER_LINK,
                     parse_mode='HTML'
                 )
                 manager.save_message(update.effective_chat.id, user_id, msg.message_id)
@@ -726,14 +767,14 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     manager.set_auto_chat(user_id, target_chat_id, target_thread_id)
     
-    thread_info = f"\n📌 Топик: <code>{target_thread_id}</code>" if target_thread_id else "\n📌 Чат (без топика)"
+    thread_info = f"\nТопик: <code>{target_thread_id}</code>" if target_thread_id else "\nЧат (без топика)"
     
     msg = await update.message.reply_text(
-        f"✅ <b>Автоотправка настроена!</b>\n\n"
-        f"📩 Чат: <code>{target_chat_id}</code>"
+        f"<b>Автоотправка настроена!</b>\n\n"
+        f"Чат: <code>{target_chat_id}</code>"
         f"{thread_info}\n"
-        f"⏰ Отправка: сразу после последней пары по Красноярску (UTC+7)\n"
-        f"❌ Отключить: <code>/disable_auto</code>" + FOOTER_LINK,
+        f"Отправка: сразу после последней пары по Красноярску (UTC+7)\n"
+        f"Отключить: <code>/disable_auto</code>" + FOOTER_LINK,
         parse_mode='HTML'
     )
     manager.save_message(update.effective_chat.id, user_id, msg.message_id)
@@ -744,7 +785,7 @@ async def disable_auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     ScheduleManager().disable_auto(user_id)
     msg = await update.message.reply_text(
-        "🚫 Автоотправка отключена." + FOOTER_LINK,
+        "Автоотправка отключена." + FOOTER_LINK,
         parse_mode='HTML'
     )
     ScheduleManager().save_message(update.effective_chat.id, user_id, msg.message_id)
@@ -752,12 +793,11 @@ async def disable_auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @with_cleanup
 async def now_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("✅ Бот воркает!" + FOOTER_LINK, parse_mode='HTML')
+    msg = await update.message.reply_text("Бот работает!" + FOOTER_LINK, parse_mode='HTML')
     ScheduleManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 
 async def send_tomorrow_schedule(bot, chat_id, thread_id, week_type_tomorrow):
-    """Отправляет расписание на завтра в указанный чат и топик"""
     tomorrow = datetime.date.today() + datetime.timedelta(days=1)
     day_name = get_day_name(tomorrow)
     schedule_text = format_schedule(day_name, week_type_tomorrow, tomorrow)
@@ -782,32 +822,28 @@ async def schedule_auto_send(app: Application):
     today = now_krasnoyarsk.date()
     tomorrow = today + datetime.timedelta(days=1)
     
-    current_day = get_day_name(today)
-    current_week = get_week_type(today)
     tomorrow_week = get_week_type(tomorrow)
     
-    last_time = get_last_lesson_end_time(current_day, current_week)
-    if not last_time:
-        logging.info(f"📭 {get_russian_day(current_day)} — выходной, автоотправка пропущена")
+    trigger_time = get_trigger_time_for_today(today)
+    
+    if not trigger_time:
+        logging.info(f"Не удалось определить время триггера для {today.strftime('%d.%m.%Y')}, пропускаем")
         return
     
-    last_hour, last_minute = last_time
-    trigger_time = now_krasnoyarsk.replace(
-        hour=last_hour, minute=last_minute, second=0, microsecond=0
-    ) + datetime.timedelta(minutes=2)
+    if now_krasnoyarsk < trigger_time:
+        seconds_to_wait = (trigger_time - now_krasnoyarsk).total_seconds()
+        logging.info(f"⏰ Автоотправка запланирована через {seconds_to_wait/60:.1f} мин (в {trigger_time.strftime('%H:%M')})")
+        await asyncio.sleep(seconds_to_wait)
+        
+        if datetime.datetime.now(KRASNOYARSK_TZ).date() != today:
+            logging.warning("Дата изменилась во время ожидания, пропускаем отправку")
+            return
     
-    if now_krasnoyarsk >= trigger_time:
-        logging.info(f"⏭ Время отправки сегодня ({trigger_time}) уже прошло")
+    elif now_krasnoyarsk - trigger_time > datetime.timedelta(hours=3):
+        logging.info(f"⏭ Время отправки ({trigger_time.strftime('%H:%M')}) прошло более 3 часов назад, пропускаем")
         return
-    
-    seconds_to_wait = (trigger_time - now_krasnoyarsk).total_seconds()
-    logging.info(f"⏰ Автоотправка запланирована через {seconds_to_wait/60:.1f} мин (в {trigger_time.strftime('%H:%M')})")
-    
-    await asyncio.sleep(seconds_to_wait)
-    
-    if datetime.datetime.now(KRASNOYARSK_TZ).date() != today:
-        logging.warning("⚠️ Дата изменилась во время ожидания, пропускаем отправку")
-        return
+    else:
+        logging.info(f"Время отправки ({trigger_time.strftime('%H:%M')}) уже наступило, отправляем сейчас")
     
     manager = ScheduleManager()
     sent_count = 0
@@ -816,15 +852,15 @@ async def schedule_auto_send(app: Application):
         try:
             await send_tomorrow_schedule(app.bot, target_chat_id, target_thread_id, tomorrow_week)
             thread_info = f" (топик {target_thread_id})" if target_thread_id else ""
-            logging.info(f"✅ Отправлено пользователю {user_id} в чат {target_chat_id}{thread_info}")
+            logging.info(f"Отправлено пользователю {user_id} в чат {target_chat_id}{thread_info}")
             sent_count += 1
         except Forbidden:
-            logging.warning(f"🚫 Бот заблокирован в чате {target_chat_id}, отключаем автоотправку для {user_id}")
+            logging.warning(f"Бот заблокирован в чате {target_chat_id}, отключаем автоотправку для {user_id}")
             manager.disable_auto(user_id)
         except BadRequest as e:
-            logging.warning(f"❌ Ошибка отправки в чат {target_chat_id}: {e}")
+            logging.warning(f"Ошибка отправки в чат {target_chat_id}: {e}")
         except Exception as e:
-            logging.error(f"💥 Неожиданная ошибка: {type(e).__name__}: {e}")
+            logging.error(f"Неожиданная ошибка: {type(e).__name__}: {e}")
     
     if sent_count > 0:
         logging.info(f"📊 Всего отправлено: {sent_count}")
@@ -837,7 +873,7 @@ async def auto_send_loop(application: Application):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logging.error(f"💥 Ошибка в цикле автоотправки: {e}")
+            logging.error(f"Ошибка в цикле автоотправки: {e}")
         
         now = datetime.datetime.now(KRASNOYARSK_TZ)
         next_day = now.date() + datetime.timedelta(days=1)
@@ -845,14 +881,13 @@ async def auto_send_loop(application: Application):
             datetime.datetime.combine(next_day, datetime.time(0, 1))
         )
         sleep_seconds = (next_check - datetime.datetime.now(KRASNOYARSK_TZ)).total_seconds()
-        logging.info(f"😴 Следующая проверка через {sleep_seconds/3600:.1f} часов")
+        logging.info(f"Следующая проверка через {sleep_seconds/3600:.1f} часов")
         await asyncio.sleep(max(60, sleep_seconds))
 
 
 async def post_init(application: Application):
-    """Запускает фоновый цикл автоотправки после инициализации бота"""
     asyncio.create_task(auto_send_loop(application))
-    logging.info("🚀 Цикл автоотправки запущен")
+    logging.info("Цикл автоотправки запущен")
 
 
 def main():
@@ -873,7 +908,7 @@ def main():
     app.add_handler(CommandHandler("disable_auto", disable_auto_cmd))
     app.add_handler(CommandHandler("now", now_cmd))
     
-    print("🤖 Бот запущен!")
+    print("Бот запущен!")
     app.run_polling()
 
 
