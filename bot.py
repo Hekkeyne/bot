@@ -902,7 +902,7 @@ def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("tomorrow", tomorrow_cmd))
-    app.add_handler(CommandHandler("day", day_cmd))
+    app.add_handler(CommandHandler("день", day_cmd))
     app.add_handler(CommandHandler("week", week_cmd))
     app.add_handler(CommandHandler("setchat", setchat_cmd))
     app.add_handler(CommandHandler("disable_auto", disable_auto_cmd))
