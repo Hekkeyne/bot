@@ -2,12 +2,15 @@ import sqlite3
 import datetime
 import logging
 import asyncio
+import os
 from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram import Update
 from telegram.error import BadRequest, Forbidden
 import pytz
 
-BOT_TOKEN = "6086143518:AAHQhYYXttkZPxQ2J9HNmS7CoFicTjPn7-4"
+BOT_TOKEN = os.getenc("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("токен неверный")
 FULL_SCHEDULE_LINK = "https://timetable.pallada.sibsau.ru/timetable/group/13922"
 FOOTER_LINK = f'\n\n🔗 Полное расписание на сайте: <a href="{FULL_SCHEDULE_LINK}">ссылка</a>'
 KRASNOYARSK_TZ = pytz.timezone('Asia/Krasnoyarsk')
