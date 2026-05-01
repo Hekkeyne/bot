@@ -8,7 +8,7 @@ from telegram import Update
 from telegram.error import BadRequest, Forbidden
 import pytz
 
-BOT_TOKEN = os.getenc("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 FULL_SCHEDULE_LINK = "https://timetable.pallada.sibsau.ru/timetable/group/13922"
