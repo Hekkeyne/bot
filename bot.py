@@ -638,10 +638,13 @@ def get_nearest_exam():
     
     for exam in EXAMS:
         exam_dt = parse_exam_datetime(exam['date'], exam['time'])
-        if exam_dt and exam_dt > now:
-            if nearest_dt is None or exam_dt < nearest_dt:
-                nearest_dt = exam_dt
-                nearest = exam
+        if exam_dt:
+            exam_dt = KRASNOYARSK_TZ.localize(exam_dt) if exam_dt.tzinfo is None else exam_dt
+            
+            if exam_dt > now:
+                if nearest_dt is None or exam_dt < nearest_dt:
+                    nearest_dt = exam_dt
+                    nearest = exam
     
     return nearest, nearest_dt
 
@@ -961,7 +964,7 @@ async def send_exam_reminder(bot, chat_id, thread_id, exam, reminder_type):
         text = f"⏰ <b>Напоминание об экзамене</b>\n\n"
         text += f"📅 Через 3 дня: <b>{exam['subject']}</b>\n"
         text += f"⏰ {exam['date']} в {exam['time']}\n"
-        text += f"👨‍🏫 {exam['teacher']}\n"
+        text += f"👨‍ {exam['teacher']}\n"
         text += f"🏫 {room_formatted}"
     elif reminder_type == "1_day":
         text = f"⚠️ <b>Напоминание об экзамене</b>\n\n"
@@ -1278,7 +1281,7 @@ async def post_init(application: Application):
 def format_schedule(day_name, week_type, date):
     lessons = SCHEDULE[week_type].get(day_name, [])
     if not lessons:
-        return f"📅 Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n\n🎉 Выходной! Пар нет." + FOOTER_LINK
+        return f"📅 Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n\n Выходной! Пар нет." + FOOTER_LINK
     
     time_groups = {}
     for lesson in lessons:
@@ -1301,7 +1304,7 @@ def format_schedule(day_name, week_type, date):
         
         if all_groups_lesson:
             room_formatted = all_groups_lesson['room'].replace('"', "'")
-            msg += f" {all_groups_lesson['subject']}\n"
+            msg += f" <b>{all_groups_lesson['subject']}</b>\n"
             msg += f" {get_emoji(all_groups_lesson['type'])}{all_groups_lesson['type'].upper()}\n"
             msg += f" 👨‍🏫 {all_groups_lesson['teacher']}\n"
             msg += f" 🏫 {room_formatted}\n\n"
@@ -1311,7 +1314,7 @@ def format_schedule(day_name, week_type, date):
                     msg += "\n"
                 room_formatted = lesson['room'].replace('"', "'")
                 msg += f" 👥 {lesson['groups'][0]}:\n"
-                msg += f" {lesson['subject']}\n"
+                msg += f" <b>{lesson['subject']}</b>\n"
                 msg += f" {get_emoji(lesson['type'])}{lesson['type'].upper()}\n"
                 msg += f" 👨‍🏫 {lesson['teacher']}\n"
                 msg += f" 🏫 {room_formatted}\n"
