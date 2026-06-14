@@ -973,16 +973,15 @@ async def send_exam_reminder(bot, chat_id, thread_id, exam, reminder_type):
         text += f"👨‍🏫 {exam['teacher']}\n"
         text += f"🏫 {room_formatted}"
     elif reminder_type == "1_hour":
-        text = f"🚨 <b>СКОРО ЭКЗАМЕН!</b>\n\n"
+        text = f"🚨 <b>Сегодня экзамен</b>\n\n"
         text += f"⏰ Через 1 час: <b>{exam['subject']}</b>\n"
         text += f"📅 {exam['date']} в {exam['time']}\n"
         text += f"👨‍🏫 {exam['teacher']}\n"
         text += f"🏫 {room_formatted}\n\n"
-        text += "💪 Удачи! Ты справишься!"
     elif reminder_type == "6_hours":
-        text = f"📝 <b>Экзамен: {exam['subject']}</b>\n\n"
-        text += f"Надеемся, всё прошло хорошо!\n"
-        text += f"⏰ Начался в {exam['time']}"
+        text = f"<b>Экзамен: {exam['subject']}</b>\n\n"
+        text += f"Дай бог все сдали\n"
+        text += f"Начался в {exam['time']}"
     
     try:
         if thread_id:
