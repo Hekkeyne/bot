@@ -978,9 +978,9 @@ async def send_exam_reminder(bot, chat_id, thread_id, exam, reminder_type):
         text += f"📅 {exam['date']} в {exam['time']}\n"
         text += f"👨‍🏫 {exam['teacher']}\n"
         text += f"🏫 {room_formatted}\n\n"
+        text+=f"пасасете"
     elif reminder_type == "6_hours":
         text = f"<b>Экзамен: {exam['subject']}</b>\n\n"
-        text += f"Дай бог все сдали\n"
         text += f"Начался в {exam['time']}"
     
     try:
