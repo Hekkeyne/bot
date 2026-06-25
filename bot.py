@@ -13,8 +13,7 @@ if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
 FULL_SCHEDULE_LINK = "https://timetable.pallada.sibsau.ru/timetable/group/13922"
-FOOTER_LINK = f'\n\n🔗 Полное расписание на сайте: ссылка'
-
+FOOTER_LINK = f'\n\n🔗 <a href="{FULL_SCHEDULE_LINK}">Полное расписание на сайте</a>'
 KRASNOYARSK_TZ = pytz.timezone('Asia/Krasnoyarsk')
 
 EXAMS = [
