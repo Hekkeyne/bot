@@ -8,12 +8,12 @@ from telegram import Update
 from telegram.error import BadRequest, Forbidden
 import pytz
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = "8404721326:AAFxMLhzDXV4Oetv7yVtWoDeBI7OFhMMmpY"#os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-FULL_SCHEDULE_LINK = "https://timetable.pallada.sibsau.ru/timetable/group/13922"
-FOOTER_LINK = f'\n\n🔗 <a href="{FULL_SCHEDULE_LINK}">Полное расписание на сайте</a>'
+FULL_SCHEDULE_LINK = "https://timetable.pallada.sibsau.ru/timetable/group/15166"
+FOOTER_LINK = f'\n\n<a href="{FULL_SCHEDULE_LINK}">Полное расписание на сайте</a>'
 KRASNOYARSK_TZ = pytz.timezone('Asia/Krasnoyarsk')
 
 EXAMS = []
@@ -655,9 +655,6 @@ def get_russian_day(eng):
     }
     return mapping.get(eng, eng)
 
-def get_emoji(lesson_type):
-    return {"лекция": "📚", "практика": "✏️", "лабораторная": "🔬"}.get(lesson_type, "📖")
-
 def parse_exam_datetime(exam_date_str, exam_time_str):
     try:
         date_obj = datetime.datetime.strptime(exam_date_str, "%d.%m.%Y").date()
@@ -668,17 +665,17 @@ def parse_exam_datetime(exam_date_str, exam_time_str):
 
 def format_exam(exam):
     room_formatted = exam['room'].replace('"', "'")
-    text = f"📝 <b>{exam['subject']}</b>\n"
-    text += f"📅 {exam['date']} в {exam['time']}\n"
-    text += f"👨‍🏫 {exam['teacher']}\n"
-    text += f"🏫 {room_formatted}"
+    text = f"<b>{exam['subject']}</b>\n"
+    text += f"{exam['date']} в {exam['time']}\n"
+    text += f"{exam['teacher']}\n"
+    text += f"{room_formatted}"
     return text
 
 def format_exams_list():
     if not EXAMS:
-        return "📋 <b>Список экзаменов</b>\n\n❌ Экзаменов пока нет." + FOOTER_LINK
+        return "<b>Список экзаменов</b>\n\nЭкзаменов пока нет." + FOOTER_LINK
 
-    text = "📋 <b>Список экзаменов</b>\n\n"
+    text = "<b>Список экзаменов</b>\n\n"
     sorted_exams = sorted(EXAMS, key=lambda x: parse_exam_datetime(x['date'], x['time']) or datetime.datetime.max)
 
     for idx, exam in enumerate(sorted_exams, 1):
@@ -708,7 +705,7 @@ def format_nearest_exam():
     nearest, nearest_dt = get_nearest_exam()
 
     if not nearest:
-        return "🔍 <b>Ближайший экзамен</b>\n\n❌ Экзаменов нет или все экзамены уже прошли." + FOOTER_LINK
+        return "<b>Ближайший экзамен</b>\n\nЭкзаменов нет или все экзамены уже прошли." + FOOTER_LINK
 
     now = datetime.datetime.now(KRASNOYARSK_TZ)
     time_until = nearest_dt - now
@@ -724,8 +721,8 @@ def format_nearest_exam():
     else:
         time_info = f"через {minutes} мин."
 
-    text = f"🔍 <b>Ближайший экзамен</b>\n\n"
-    text += f"⏰ {time_info}\n\n"
+    text = f"<b>Ближайший экзамен</b>\n\n"
+    text += f"{time_info}\n\n"
     text += format_exam(nearest)
     text += FOOTER_LINK
 
@@ -749,25 +746,12 @@ def with_cleanup(handler):
 @with_cleanup
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🤖 <b>Бот расписания</b>\n\n"
-        "📋 <b>Команды расписания:</b>\n"
+        "<b>Бот расписания</b>\n\n"
+        "<b>Команды расписания:</b>\n"
         "/today — сегодня\n"
         "/tomorrow — завтра\n"
         "/week — вся неделя\n"
-        "/day <день> — конкретный день (напр. /day вторник)\n"
-        "/setchat [chat_id] [thread_id] — настроить автоотправку после последней пары\n"
-        "/disable_auto — отключить автоотправку\n"
-        "/sendtext <текст> — отправить текст в настроенный чат/топик\n\n"
-        "📝 <b>Команды экзаменов:</b>\n"
-        "/exams — список всех экзаменов\n"
-        "/nearexam — ближайший экзамен\n"
-        "/setexam [chat_id] [thread_id] — настроить напоминания об экзаменах\n\n"
-        "💡 <b>Примеры:</b>\n"
-        "<code>/setchat</code> — в ЛС (отправка в этот чат)\n"
-        "<code>/setchat -1001234567890</code> — в группу\n"
-        "<code>/setchat -1001234567890 42</code> — в топик группы\n\n"
-        "<code>/setexam</code> — включить напоминания об экзаменах\n"
-        "<code>/setexam -1001234567890 42</code> — в конкретный чат/топик"
+        "/day &lt;день&gt; — конкретный день (напр. /day вторник)\n"
         + FOOTER_LINK
     )
     msg = await update.message.reply_text(text, parse_mode='HTML')
@@ -801,7 +785,7 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     day = mapping.get(arg)
     if not day:
         msg = await update.message.reply_text(
-            "❌ Укажите день: /day понедельник" + FOOTER_LINK,
+            "Укажите день: /day понедельник" + FOOTER_LINK,
             parse_mode='HTML'
         )
     else:
@@ -818,7 +802,7 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     today = datetime.date.today()
     week_type = get_week_type(today)
-    text = "📅 <b>Расписание на неделю</b>\n\n"
+    text = "<b>Расписание на неделю</b>\n\n"
     for eng in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
         lessons = SCHEDULE[week_type].get(eng, [])
         ru = get_russian_day(eng)
@@ -827,20 +811,20 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for lesson in lessons:
                 time_groups.setdefault(lesson['time'], []).append(lesson)
 
-            text += f"🔹 <b>{ru}</b>:\n"
+            text += f"<b>{ru}</b>:\n"
             for time_slot in sorted(time_groups.keys(), key=lambda t: t.split('-')[0]):
                 group = time_groups[time_slot]
                 all_groups_lesson = next((l for l in group if l['groups'][0] == "все"), None)
                 if all_groups_lesson:
-                    text += f"⏰ {time_slot} | {all_groups_lesson['subject']} ({all_groups_lesson['type'].upper()})\n"
+                    text += f"{time_slot} | <b>{all_groups_lesson['subject']}</b> ({all_groups_lesson['type']})\n"
                 else:
                     for lesson in group:
-                        text += f"⏰ {time_slot} | {lesson['groups'][0]}: {lesson['subject']} ({lesson['type'].upper()})\n"
+                        text += f"{time_slot} | {lesson['groups'][0]}: <b>{lesson['subject']}</b> ({lesson['type']})\n"
             text += "\n"
         else:
-            text += f"🔹 <b>{ru}</b>: 🎉 Выходной\n\n"
+            text += f"<b>{ru}</b>: Выходной\n\n"
     
-    text += f"📊 Неделя: {'1-я' if week_type == 'even' else '2-я'}" + FOOTER_LINK
+    text += f"Неделя: {'1-я' if week_type == 'even' else '2-я'}" + FOOTER_LINK
     msg = await update.message.reply_text(text, parse_mode='HTML')
     DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
@@ -872,7 +856,7 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not target_chat_id:
         msg = await update.message.reply_text(
-            "⚙️ <b>Настройка автоотправки:</b>\n\n"
+            "<b>Настройка автоотправки:</b>\n\n"
             "В ЛС: просто <code>/setchat</code>\n"
             "В группе: <code>/setchat &lt;chat_id&gt;</code>\n"
             "В топик: <code>/setchat &lt;chat_id&gt; &lt;thread_id&gt;</code>\n\n"
@@ -886,7 +870,7 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manager.set_auto_chat(user_id, target_chat_id, target_thread_id)
     thread_info = f"\nТопик: <code>{target_thread_id}</code>" if target_thread_id else "\nЧат (без топика)"
     msg = await update.message.reply_text(
-        f"✅ <b>Автоотправка настроена!</b>\n\n"
+        f"<b>Автоотправка настроена!</b>\n\n"
         f"Чат: <code>{target_chat_id}</code>"
         f"{thread_info}\n"
         f"Отправка: сразу после последней пары по Красноярску (UTC+7)\n"
@@ -900,7 +884,7 @@ async def disable_auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     DatabaseManager().disable_auto(user_id)
     msg = await update.message.reply_text(
-        "❌ Автоотправка отключена." + FOOTER_LINK,
+        "Автоотправка отключена." + FOOTER_LINK,
         parse_mode='HTML'
     )
     DatabaseManager().save_message(update.effective_chat.id, user_id, msg.message_id)
@@ -912,7 +896,7 @@ async def sendtext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
         msg = await update.message.reply_text(
-            "❌ <b>Ошибка</b>\n\n"
+            "<b>Ошибка</b>\n\n"
             "Укажите текст для отправки.\n"
             "Пример: <code>/sendtext Всем привет, встречаемся в 15:00!</code>" + FOOTER_LINK,
             parse_mode='HTML'
@@ -926,7 +910,7 @@ async def sendtext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not auto_chat_id:
         msg = await update.message.reply_text(
-            "❌ <b>Ошибка</b>\n\n"
+            "<b>Ошибка</b>\n\n"
             "Вы не настроили чат для рассылки.\n"
             "Используйте /setchat, чтобы указать чат и топик." + FOOTER_LINK,
             parse_mode='HTML'
@@ -949,7 +933,7 @@ async def sendtext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         thread_info = f"\nТопик: <code>{message_thread_id}</code>" if message_thread_id else "\nЧат (без топика)"
         msg = await update.message.reply_text(
-            f"✅ <b>Сообщение успешно отправлено!</b>\n\n"
+            f"<b>Сообщение успешно отправлено!</b>\n\n"
             f"Чат: <code>{auto_chat_id}</code>"
             f"{thread_info}\n\n"
             f"Текст:\n{text_to_send}" + FOOTER_LINK,
@@ -957,7 +941,7 @@ async def sendtext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         msg = await update.message.reply_text(
-            f"❌ <b>Ошибка отправки</b>\n\n"
+            f"<b>Ошибка отправки</b>\n\n"
             f"Не удалось отправить сообщение.\n"
             f"Проверьте, добавлен ли бот в чат <code>{auto_chat_id}</code> и есть ли у него права.\n\n"
             f"Ошибка: {e}" + FOOTER_LINK,
@@ -996,7 +980,7 @@ async def setexam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not EXAMS:
         msg = await update.message.reply_text(
-            "❌ <b>Ошибка</b>\n\nЭкзамены не заполнены. Обратитесь к администратору." + FOOTER_LINK,
+            "<b>Ошибка</b>\n\nЭкзамены не заполнены. Обратитесь к администратору." + FOOTER_LINK,
             parse_mode='HTML'
         )
         manager.save_message(update.effective_chat.id, user_id, msg.message_id)
@@ -1023,7 +1007,7 @@ async def setexam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not target_chat_id:
         msg = await update.message.reply_text(
-            "⚙️ <b>Настройка напоминаний об экзаменах:</b>\n\n"
+            "<b>Настройка напоминаний об экзаменах:</b>\n\n"
             "В ЛС: просто <code>/setexam</code>\n"
             "В группе: <code>/setexam &lt;chat_id&gt;</code>\n"
             "В топик: <code>/setexam &lt;chat_id&gt; &lt;thread_id&gt;</code>\n\n"
@@ -1047,7 +1031,7 @@ async def setexam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     thread_info = f"\nТопик: <code>{target_thread_id}</code>" if target_thread_id else "\nЧат (без топика)"
     msg = await update.message.reply_text(
-        f"✅ <b>Напоминания об экзаменах включены!</b>\n\n"
+        f"<b>Напоминания об экзаменах включены!</b>\n\n"
         f"Чат: <code>{target_chat_id}</code>"
         f"{thread_info}\n"
         f"Настроено напоминаний: {reminders_set}\n\n"
@@ -1066,26 +1050,26 @@ async def send_exam_reminder(bot, chat_id, thread_id, exam, reminder_type):
     room_formatted = exam['room'].replace('"', "'")
 
     if reminder_type == "3_days":
-        text = f"⏰ <b>Напоминание об экзамене</b>\n\n"
-        text += f"📅 Через 3 дня: <b>{exam['subject']}</b>\n"
-        text += f"⏰ {exam['date']} в {exam['time']}\n"
-        text += f"👨‍🏫 {exam['teacher']}\n"
-        text += f"🏫 {room_formatted}"
+        text = f"<b>Напоминание об экзамене</b>\n\n"
+        text += f"Через 3 дня: <b>{exam['subject']}</b>\n"
+        text += f"{exam['date']} в {exam['time']}\n"
+        text += f"{exam['teacher']}\n"
+        text += f"{room_formatted}"
     elif reminder_type == "1_day":
-        text = f"⚠️ <b>Напоминание об экзамене</b>\n\n"
-        text += f"📅 Завтра: <b>{exam['subject']}</b>\n"
-        text += f"⏰ {exam['date']} в {exam['time']}\n"
-        text += f"👨‍🏫 {exam['teacher']}\n"
-        text += f"🏫 {room_formatted}"
+        text = f"<b>Напоминание об экзамене</b>\n\n"
+        text += f"Завтра: <b>{exam['subject']}</b>\n"
+        text += f"{exam['date']} в {exam['time']}\n"
+        text += f"{exam['teacher']}\n"
+        text += f"{room_formatted}"
     elif reminder_type == "1_hour":
-        text = f"🚨 <b>Сегодня экзамен</b>\n\n"
-        text += f"⏰ Через 1 час: <b>{exam['subject']}</b>\n"
-        text += f"📅 {exam['date']} в {exam['time']}\n"
-        text += f"👨‍🏫 {exam['teacher']}\n"
-        text += f"🏫 {room_formatted}\n\n"
+        text = f"<b>Сегодня экзамен</b>\n\n"
+        text += f"Через 1 час: <b>{exam['subject']}</b>\n"
+        text += f"{exam['date']} в {exam['time']}\n"
+        text += f"{exam['teacher']}\n"
+        text += f"{room_formatted}\n\n"
         text += f"пасасете"
     elif reminder_type == "6_hours":
-        text = f"🔔 <b>Экзамен: {exam['subject']}</b>\n\n"
+        text = f"<b>Экзамен: {exam['subject']}</b>\n\n"
         text += f"Начался в {exam['time']}"
 
     try:
@@ -1158,14 +1142,14 @@ async def get_next_exam_reminder_time():
     return next_reminder_time, next_reminder_data
 
 async def exam_reminder_loop(application: Application):
-    logging.info("🎓 Цикл напоминаний об экзаменах запущен")
+    logging.info("Цикл напоминаний об экзаменах запущен")
 
     while True:
         try:
             next_time, reminder_data = await get_next_exam_reminder_time()
 
             if next_time is None:
-                logging.info("📭 Нет активных напоминаний об экзаменах, следующая проверка через час")
+                logging.info("Нет активных напоминаний об экзаменах, следующая проверка через час")
                 await asyncio.sleep(3600)
                 continue
 
@@ -1173,10 +1157,10 @@ async def exam_reminder_loop(application: Application):
             seconds_to_wait = (next_time - now).total_seconds()
 
             if seconds_to_wait <= 0:
-                logging.info(f"⏰ Время напоминания наступило, отправляем...")
+                logging.info(f"Время напоминания наступило, отправляем...")
             else:
                 logging.info(
-                    f"⏰ Следующее напоминание через {seconds_to_wait/3600:.1f} ч "
+                    f"Следующее напоминание через {seconds_to_wait/3600:.1f} ч "
                     f"({next_time.strftime('%d.%m %H:%M')}): "
                     f"{reminder_data['subject']} ({reminder_data['reminder_type']})"
                 )
@@ -1206,7 +1190,7 @@ async def exam_reminder_loop(application: Application):
                         reminder_data['reminder_type']
                     )
                     logging.info(
-                        f"✅ Отправлено напоминание ({reminder_data['reminder_type']}) "
+                        f"Отправлено напоминание ({reminder_data['reminder_type']}) "
                         f"пользователю {reminder_data['user_id']} об экзамене {reminder_data['subject']}"
                     )
 
@@ -1223,17 +1207,17 @@ async def exam_reminder_loop(application: Application):
                                         next_exam = e
 
                         if next_exam:
-                            logging.info(f"📚 Найден следующий экзамен: {next_exam['subject']}, запускаем алгоритм напоминаний")
+                            logging.info(f"Найден следующий экзамен: {next_exam['subject']}, запускаем алгоритм напоминаний")
                 else:
-                    logging.error(f"❌ Не удалось отправить напоминание")
+                    logging.error(f"Не удалось отправить напоминание")
 
             await asyncio.sleep(1)
 
         except asyncio.CancelledError:
-            logging.info("🛑 Цикл напоминаний об экзаменах остановлен")
+            logging.info("Цикл напоминаний об экзаменах остановлен")
             break
         except Exception as e:
-            logging.error(f"❌ Ошибка в цикле напоминаний об экзаменах: {e}")
+            logging.error(f"Ошибка в цикле напоминаний об экзаменах: {e}")
             await asyncio.sleep(60)
 
 async def send_tomorrow_schedule(bot, chat_id, thread_id, week_type_tomorrow):
@@ -1317,14 +1301,14 @@ async def schedule_auto_send(app: Application):
 
     if now_krasnoyarsk < trigger_time:
         seconds_to_wait = (trigger_time - now_krasnoyarsk).total_seconds()
-        logging.info(f"⏰ Автоотправка запланирована через {seconds_to_wait/60:.1f} мин (в {trigger_time.strftime('%H:%M')})")
+        logging.info(f"Автоотправка запланирована через {seconds_to_wait/60:.1f} мин (в {trigger_time.strftime('%H:%M')})")
         await asyncio.sleep(seconds_to_wait)
 
         if datetime.datetime.now(KRASNOYARSK_TZ).date() != today:
             logging.warning("Дата изменилась во время ожидания, пропускаем отправку")
             return
         elif now_krasnoyarsk - trigger_time > datetime.timedelta(hours=3):
-            logging.info(f"⏭ Время отправки ({trigger_time.strftime('%H:%M')}) прошло более 3 часов назад, пропускаем")
+            logging.info(f"Время отправки ({trigger_time.strftime('%H:%M')}) прошло более 3 часов назад, пропускаем")
             return
         else:
             logging.info(f"Время отправки ({trigger_time.strftime('%H:%M')}) уже наступило, отправляем сейчас")
@@ -1347,7 +1331,7 @@ async def schedule_auto_send(app: Application):
             logging.error(f"Неожиданная ошибка: {type(e).__name__}: {e}")
 
     if sent_count > 0:
-        logging.info(f"📊 Всего отправлено: {sent_count}")
+        logging.info(f"Всего отправлено: {sent_count}")
 
 async def auto_send_loop(application: Application):
     while True:
@@ -1375,7 +1359,7 @@ async def post_init(application: Application):
 def format_schedule(day_name, week_type, date):
     lessons = SCHEDULE[week_type].get(day_name, [])
     if not lessons:
-        return f"📅 Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n\n🎉 Выходной! Пар нет." + FOOTER_LINK
+        return f"Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n\nВыходной! Пар нет." + FOOTER_LINK
 
     time_groups = {}
     for lesson in lessons:
@@ -1383,10 +1367,10 @@ def format_schedule(day_name, week_type, date):
 
     sorted_times = sorted(time_groups.keys(), key=lambda t: t.split('-')[0])
 
-    msg = f"📅 Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n"
-    msg += f"📊 Неделя: {'1-я' if week_type == 'even' else '2-я'}\n\n"
+    msg = f"Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n"
+    msg += f"Неделя: {'1-я' if week_type == 'even' else '2-я'}\n\n"
 
-    for idx, time_slot in enumerate(sorted_times, 1):
+    for time_slot in sorted_times:
         group = time_groups[time_slot]
         all_groups_lesson = None
         for lesson in group:
@@ -1394,24 +1378,22 @@ def format_schedule(day_name, week_type, date):
                 all_groups_lesson = lesson
                 break
 
-        msg += f"{idx}. ⏰ {time_slot}\n"
+        msg += f"{time_slot}\n"
 
         if all_groups_lesson:
             room_formatted = all_groups_lesson['room'].replace('"', "'")
-            msg += f"📚 <b>{all_groups_lesson['subject']}</b>\n"
-            msg += f"{get_emoji(all_groups_lesson['type'])} {all_groups_lesson['type'].upper()}\n"
-            msg += f"👨‍🏫 {all_groups_lesson['teacher']}\n"
-            msg += f"🏫 {room_formatted}\n\n"
+            msg += f"<b>{all_groups_lesson['subject']}</b> ({all_groups_lesson['type']})\n"
+            msg += f"{all_groups_lesson['teacher']}\n"
+            msg += f"{room_formatted}\n\n"
         else:
             for i, lesson in enumerate(group):
                 if i > 0:
                     msg += "\n"
                 room_formatted = lesson['room'].replace('"', "'")
-                msg += f"👥 {lesson['groups'][0]}:\n"
-                msg += f"📚 <b>{lesson['subject']}</b>\n"
-                msg += f"{get_emoji(lesson['type'])} {lesson['type'].upper()}\n"
-                msg += f"👨‍🏫 {lesson['teacher']}\n"
-                msg += f"🏫 {room_formatted}\n"
+                msg += f"{lesson['groups'][0]}:\n"
+                msg += f"<b>{lesson['subject']}</b> ({lesson['type']})\n"
+                msg += f"{lesson['teacher']}\n"
+                msg += f"{room_formatted}\n"
             msg += "\n"
 
     return msg.strip() + FOOTER_LINK
