@@ -642,7 +642,7 @@ class DatabaseManager:
 def get_week_type(date=None):
     if date is None:
         date = datetime.date.today()
-    return "even" if date.isocalendar()[1] % 2 == 0 else "odd"
+    return "odd" if date.isocalendar()[1] % 2 == 0 else "even"
 
 def get_day_name(date):
     days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
