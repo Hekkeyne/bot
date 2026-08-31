@@ -8,7 +8,7 @@ from telegram import Update
 from telegram.error import BadRequest, Forbidden
 import pytz
 
-BOT_TOKEN = "8404721326:AAFxMLhzDXV4Oetv7yVtWoDeBI7OFhMMmpY"#os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
