@@ -824,7 +824,7 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text += f"<b>{ru}</b>: Выходной\n\n"
     
-    text += f"Неделя: {'1-я' if week_type == 'even' else '2-я'}" + FOOTER_LINK
+    text += f"Неделя: {'1-я' if week_type == 'odd' else '2-я'}" + FOOTER_LINK
     msg = await update.message.reply_text(text, parse_mode='HTML')
     DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
@@ -1368,7 +1368,7 @@ def format_schedule(day_name, week_type, date):
     sorted_times = sorted(time_groups.keys(), key=lambda t: t.split('-')[0])
 
     msg = f"Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n"
-    msg += f"Неделя: {'1-я' if week_type == 'even' else '2-я'}\n\n"
+    msg += f"Неделя: {'1-я' if week_type == 'odd' else '2-я'}\n\n"
 
     for time_slot in sorted_times:
         group = time_groups[time_slot]
