@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 BASE_URL = "https://timetable.pallada.sibsau.ru"
 SEARCH_URL = BASE_URL + "/ajax/search_schedule"
 GROUP_URL = BASE_URL + "/timetable/group/{group_id}"
+GROUP_PAGE_RE = re.compile(r"/timetable/group/(\d+)")
 
 HEADERS = {
     "User-Agent": (
@@ -72,10 +73,36 @@ def search_groups(query, session=None):
     return [{"id": int(g["id"]), "name": _clean(g["name"])} for g in groups]
 
 
+def group_page_id(search_id, query, session=None):
+    session = session or _session()
+    try:
+        page = session.get(BASE_URL + "/timetable", timeout=REQUEST_TIMEOUT)
+        page.raise_for_status()
+        token = re.search(r'name="csrf_token"[^>]*value="([^"]+)"', page.text)
+        csrf = token.group(1) if token else ""
+        response = session.post(
+            BASE_URL + "/timetable",
+            data={"query": query, "id": str(search_id), "csrf_token": csrf},
+            allow_redirects=False,
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise ScheduleError("Не удалось определить страницу группы %s: %s" % (search_id, exc)) from exc
+
+    location = response.headers.get("Location", "")
+    found = GROUP_PAGE_RE.search(location)
+    if not found:
+        raise ScheduleError("Сайт не сообщил страницу группы %s" % search_id)
+    return int(found.group(1))
+
+
 def find_group(query):
     matches = search_groups(query)
     needle = _clean(query).upper()
     exact = next((g for g in matches if g["name"].upper() == needle), None)
+    if exact:
+        exact = dict(exact)
+        exact["page_id"] = group_page_id(exact["id"], exact["name"])
     return exact, matches
 
 

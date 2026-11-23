@@ -468,11 +468,11 @@ async def apply_group(update, chat_id, thread_id, query):
         manager.save_message(chat_id, user_id, msg.message_id)
         return
 
-    manager.set_group(chat_id, thread_id, exact["id"], exact["name"], user_id)
+    manager.set_group(chat_id, thread_id, exact["page_id"], exact["name"], user_id)
     PENDING_GROUP.pop((chat_id, thread_id), None)
 
-    sub = {"group_id": exact["id"], "group_name": exact["name"]}
-    schedule = get_schedule_or_none(exact["id"])
+    sub = {"group_id": exact["page_id"], "group_name": exact["name"]}
+    schedule = get_schedule_or_none(exact["page_id"])
     if schedule:
         text = (f"<b>Группа сохранена: {exact['name']}</b>\n"
                 f"Автоотправка после пар: <code>/setchat</code>\n\n"
