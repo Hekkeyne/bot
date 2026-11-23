@@ -17,12 +17,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "diag-5 proxy-default"
+BUILD = "diag-6 autosends"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
 KRASNOYARSK_TZ = pytz.timezone('Asia/Krasnoyarsk')
-DB_PATH = "schedule_bot.db"
+DB_PATH = os.getenv("DB_PATH") or "schedule_bot.db"
 PUBLISH_DELAY_MINUTES = 2
 STALE_PUBLISH_LIMIT = datetime.timedelta(hours=3)
 GROUP_PROMPT_TTL = 600
@@ -55,10 +55,44 @@ def dest_key(update):
 class DatabaseManager:
     def __init__(self):
         self.init_db()
+        self.migrate_schema()
         self.migrate_legacy_settings()
 
+    def migrate_schema(self):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(subscriptions)")}
+            if "id" in columns:
+                if "chat_title" not in columns:
+                    conn.execute("ALTER TABLE subscriptions ADD COLUMN chat_title TEXT")
+                return
+
+            conn.execute("ALTER TABLE subscriptions RENAME TO subscriptions_old")
+            conn.execute('''
+                CREATE TABLE subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    thread_id INTEGER NOT NULL DEFAULT 0,
+                    chat_title TEXT,
+                    group_id INTEGER,
+                    group_name TEXT,
+                    auto_enabled INTEGER DEFAULT 0,
+                    created_by INTEGER,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (chat_id, thread_id)
+                )
+            ''')
+            conn.execute('''
+                INSERT INTO subscriptions
+                    (chat_id, thread_id, chat_title, group_id, group_name, auto_enabled, created_by, updated_at)
+                SELECT chat_id, thread_id, NULL, group_id, group_name, auto_enabled, created_by, updated_at
+                FROM subscriptions_old
+            ''')
+            conn.execute("DROP TABLE subscriptions_old")
+            logging.info("Таблица subscriptions перестроена с номерами")
+
     def init_db(self):
-        with sqlite3.connect("schedule_bot.db") as conn:
+        with sqlite3.connect(DB_PATH) as conn:
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS bot_messages (
                     id INTEGER PRIMARY KEY,
@@ -103,25 +137,27 @@ class DatabaseManager:
             ''')
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     chat_id INTEGER NOT NULL,
                     thread_id INTEGER NOT NULL DEFAULT 0,
+                    chat_title TEXT,
                     group_id INTEGER,
                     group_name TEXT,
                     auto_enabled INTEGER DEFAULT 0,
                     created_by INTEGER,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (chat_id, thread_id)
+                    UNIQUE (chat_id, thread_id)
                 )
             ''')
 
     def save_message(self, chat_id, user_id, message_id):
-        with sqlite3.connect("schedule_bot.db") as conn:
+        with sqlite3.connect(DB_PATH) as conn:
             conn.execute('DELETE FROM bot_messages WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
             conn.execute('INSERT INTO bot_messages (chat_id, user_id, message_id) VALUES (?, ?, ?)',
                          (chat_id, user_id, message_id))
 
     def get_last_message(self, chat_id, user_id):
-        with sqlite3.connect("schedule_bot.db") as conn:
+        with sqlite3.connect(DB_PATH) as conn:
             cur = conn.execute(
                 'SELECT message_id FROM bot_messages WHERE chat_id = ? AND user_id = ? ORDER BY timestamp DESC LIMIT 1',
                 (chat_id, user_id)
@@ -129,17 +165,18 @@ class DatabaseManager:
             row = cur.fetchone()
             return row[0] if row else None
 
-    def set_group(self, chat_id, thread_id, group_id, group_name, user_id=None):
+    def set_group(self, chat_id, thread_id, group_id, group_name, user_id=None, chat_title=None):
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(
-                'INSERT OR IGNORE INTO subscriptions (chat_id, thread_id, group_id, group_name, created_by) '
-                'VALUES (?, ?, ?, ?, ?)',
-                (chat_id, thread_id, group_id, group_name, user_id)
+                'INSERT OR IGNORE INTO subscriptions (chat_id, thread_id, chat_title, group_id, group_name, created_by) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                (chat_id, thread_id, chat_title, group_id, group_name, user_id)
             )
             conn.execute(
                 'UPDATE subscriptions SET group_id = ?, group_name = ?, created_by = ?, '
-                'updated_at = CURRENT_TIMESTAMP WHERE chat_id = ? AND thread_id = ?',
-                (group_id, group_name, user_id, chat_id, thread_id)
+                'chat_title = COALESCE(?, chat_title), updated_at = CURRENT_TIMESTAMP '
+                'WHERE chat_id = ? AND thread_id = ?',
+                (group_id, group_name, user_id, chat_title, chat_id, thread_id)
             )
 
     def get_subscription(self, chat_id, thread_id):
@@ -171,8 +208,21 @@ class DatabaseManager:
     def get_subscriptions_by(self, user_id):
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
-            cur = conn.execute('SELECT * FROM subscriptions WHERE created_by = ?', (user_id,))
+            cur = conn.execute('SELECT * FROM subscriptions WHERE created_by = ? ORDER BY id', (user_id,))
             return [dict(row) for row in cur.fetchall()]
+
+    def get_subscription_by_id(self, sub_id):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute('SELECT * FROM subscriptions WHERE id = ?', (sub_id,)).fetchone()
+            return dict(row) if row else None
+
+    def set_auto_by_id(self, sub_id, enabled):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                'UPDATE subscriptions SET auto_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                (1 if enabled else 0, sub_id)
+            )
 
     def migrate_legacy_settings(self):
         with sqlite3.connect(DB_PATH) as conn:
@@ -193,7 +243,7 @@ class DatabaseManager:
             logging.info("Перенесена старая настройка: чат %s, топик %s", row['auto_chat_id'], thread_id)
 
     def set_exam_reminder(self, user_id, chat_id, thread_id, exam_date, exam_time, subject):
-        with sqlite3.connect("schedule_bot.db") as conn:
+        with sqlite3.connect(DB_PATH) as conn:
             conn.execute('''
                 INSERT OR REPLACE INTO exam_reminders
                 (user_id, chat_id, message_thread_id, exam_date, exam_time, subject, reminder_enabled)
@@ -201,7 +251,7 @@ class DatabaseManager:
             ''', (user_id, chat_id, thread_id, exam_date, exam_time, subject))
 
     def get_active_exam_reminders(self):
-        with sqlite3.connect("schedule_bot.db") as conn:
+        with sqlite3.connect(DB_PATH) as conn:
             cur = conn.execute('''
                 SELECT user_id, chat_id, message_thread_id, exam_date, exam_time, subject
                 FROM exam_reminders
@@ -211,7 +261,7 @@ class DatabaseManager:
             return cur.fetchall()
 
     def disable_exam_reminder(self, user_id, exam_date, exam_time):
-        with sqlite3.connect("schedule_bot.db") as conn:
+        with sqlite3.connect(DB_PATH) as conn:
             conn.execute('''
                 UPDATE exam_reminders
                 SET reminder_enabled = 0
@@ -219,14 +269,14 @@ class DatabaseManager:
             ''', (user_id, exam_date, exam_time))
 
     def mark_reminder_sent(self, user_id, chat_id, exam_date, reminder_type):
-        with sqlite3.connect("schedule_bot.db") as conn:
+        with sqlite3.connect(DB_PATH) as conn:
             conn.execute('''
                 INSERT INTO sent_reminders (user_id, chat_id, exam_date, reminder_type)
                 VALUES (?, ?, ?, ?)
             ''', (user_id, chat_id, exam_date, reminder_type))
 
     def was_reminder_sent(self, user_id, chat_id, exam_date, reminder_type):
-        with sqlite3.connect("schedule_bot.db") as conn:
+        with sqlite3.connect(DB_PATH) as conn:
             cur = conn.execute('''
                 SELECT COUNT(*) FROM sent_reminders
                 WHERE user_id = ? AND chat_id = ? AND exam_date = ? AND reminder_type = ?
@@ -234,7 +284,7 @@ class DatabaseManager:
             return cur.fetchone()[0] > 0
 
     def clear_old_reminders(self, exam_date):
-        with sqlite3.connect("schedule_bot.db") as conn:
+        with sqlite3.connect(DB_PATH) as conn:
             conn.execute('''
                 DELETE FROM sent_reminders WHERE exam_date < ?
             ''', (exam_date,))
@@ -249,6 +299,32 @@ def get_russian_day(eng):
         "thursday": "Четверг", "friday": "Пятница", "saturday": "Суббота", "sunday": "Воскресенье"
     }
     return mapping.get(eng, eng)
+
+async def group_by_query(update, query):
+    query = (query or "").strip()
+    if not query:
+        return None
+    try:
+        exact, matches = ss.find_group(query)
+    except ss.ScheduleError as exc:
+        msg = await update.message.reply_text(
+            f"Не удалось проверить группу: {esc(exc)}" + FOOTER_LINK, parse_mode='HTML')
+        DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+        return False
+
+    if exact:
+        return {"group_id": exact["page_id"], "group_name": exact["name"]}
+
+    if matches:
+        names = ", ".join(esc(g["name"]) for g in matches)
+        text = (f"Нашлось несколько групп: {names}.\n"
+                f"Напишите название полностью." + FOOTER_LINK)
+    else:
+        text = f"Группа «{esc(query)}» не найдена." + FOOTER_LINK
+    msg = await update.message.reply_text(text, parse_mode='HTML')
+    DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+    return False
+
 
 def get_schedule_or_none(group_id):
     try:
@@ -385,10 +461,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/today — сегодня\n"
         "/tomorrow — завтра\n"
         "/week — вся неделя\n"
-        "/day &lt;день&gt; — конкретный день (напр. /day вторник)\n\n"
+        "/day &lt;день&gt; — конкретный день\n"
+        "Группу можно указать сразу, без сохранения:\n"
+        "/tomorrow БПА24-02, /week БПА24-02, /day вторник БПА24-02\n\n"
         "<b>Автоотправка:</b>\n"
         "/setchat — публиковать расписание в этот чат после последней пары\n"
-        "/disable_auto — выключить автоотправку\n"
+        "/autosends — список всех автоотправок с номерами\n"
+        "/disable_auto — выключить здесь или по номеру: /disable_auto 2\n"
         + FOOTER_LINK
     )
     msg = await update.message.reply_text(text, parse_mode='HTML')
@@ -397,7 +476,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @with_cleanup
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manager = DatabaseManager()
-    sub = await require_group(update, manager)
+    chosen = await group_by_query(update, " ".join(context.args))
+    if chosen is False:
+        return
+    sub = chosen or await require_group(update, manager)
     if not sub:
         return
     today = datetime.date.today()
@@ -410,7 +492,10 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @with_cleanup
 async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manager = DatabaseManager()
-    sub = await require_group(update, manager)
+    chosen = await group_by_query(update, " ".join(context.args))
+    if chosen is False:
+        return
+    sub = chosen or await require_group(update, manager)
     if not sub:
         return
     tmr = datetime.date.today() + datetime.timedelta(days=1)
@@ -427,17 +512,21 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'понедельник': 'monday', 'вторник': 'tuesday', 'среда': 'wednesday',
         'четверг': 'thursday', 'пятница': 'friday', 'суббота': 'saturday', 'воскресенье': 'sunday'
     }
-    arg = " ".join(context.args).lower()
-    day = mapping.get(arg)
+    args = list(context.args)
+    day = mapping.get(args[0].lower()) if args else None
     if not day:
         msg = await update.message.reply_text(
-            "Укажите день: /day понедельник" + FOOTER_LINK,
+            "Укажите день: /day понедельник\n"
+            "С группой: /day вторник БПА24-02" + FOOTER_LINK,
             parse_mode='HTML'
         )
         manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
         return
 
-    sub = await require_group(update, manager)
+    chosen = await group_by_query(update, " ".join(args[1:]))
+    if chosen is False:
+        return
+    sub = chosen or await require_group(update, manager)
     if not sub:
         return
     target = datetime.date.today()
@@ -452,7 +541,10 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @with_cleanup
 async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manager = DatabaseManager()
-    sub = await require_group(update, manager)
+    chosen = await group_by_query(update, " ".join(context.args))
+    if chosen is False:
+        return
+    sub = chosen or await require_group(update, manager)
     if not sub:
         return
     today = datetime.date.today()
@@ -461,6 +553,20 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
     msg = await update.message.reply_text(text, parse_mode='HTML')
     manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+
+def describe_place(sub):
+    chat_id = sub["chat_id"]
+    thread_id = sub.get("thread_id") or 0
+    if chat_id > 0:
+        where = "ЛС"
+    elif sub.get("chat_title"):
+        where = "«%s»" % sub["chat_title"]
+    else:
+        where = "чат %s" % chat_id
+    if thread_id:
+        where += ", топик %s" % thread_id
+    return where
+
 
 async def apply_group(update, chat_id, thread_id, query):
     manager = DatabaseManager()
@@ -489,7 +595,8 @@ async def apply_group(update, chat_id, thread_id, query):
         manager.save_message(chat_id, user_id, msg.message_id)
         return
 
-    manager.set_group(chat_id, thread_id, exact["page_id"], exact["name"], user_id)
+    manager.set_group(chat_id, thread_id, exact["page_id"], exact["name"], user_id,
+                      update.effective_chat.title)
     PENDING_GROUP.pop((chat_id, thread_id), None)
 
     sub = {"group_id": exact["page_id"], "group_name": exact["name"]}
@@ -547,7 +654,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += (f"Группа: <code>{esc(sub['group_name'])}</code>\n"
                  f"Автоотправка: {auto}\n")
         if sub.get("auto_enabled"):
-            text += "Отправка: после последней пары → расписание на завтра\n"
+            text += "Отправка: после последней пары бот присылает расписание на завтра\n"
         else:
             text += "Включить: <code>/setchat</code>\n"
 
@@ -596,23 +703,59 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Автоотправка включена</b>\n\n"
         f"Чат: <code>{target_chat}</code>{thread_info}\n"
         f"Группа: <code>{esc(sub['group_name'])}</code>\n"
-        f"Отправка: после последней пары по Красноярску → расписание на завтра\n"
+        f"Отправка: после последней пары по Красноярску бот присылает расписание на завтра\n"
         f"Выключить: <code>/disable_auto</code>" + group_link(sub.get("group_id")),
         parse_mode='HTML')
     manager.save_message(update.effective_chat.id, sender_id, msg.message_id)
 
 @with_cleanup
+async def autosends_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    manager = DatabaseManager()
+    subs = manager.get_subscriptions_by(update.effective_user.id)
+    if not subs:
+        text = ("Автоотправок нет.\n"
+                "Задайте группу командой <code>/group БПА24-01</code>, "
+                "потом включите отправку: <code>/setchat</code>." + FOOTER_LINK)
+    else:
+        text = "<b>Автоотправки</b>\n\n"
+        for sub in subs:
+            status = "включена" if sub.get("auto_enabled") else "выключена"
+            text += (f"{sub['id']}. {esc(describe_place(sub))} — "
+                     f"{esc(sub.get('group_name') or 'без группы')} — {status}\n")
+        text += ("\nОтключить по номеру: <code>/disable_auto 1</code>\n"
+                 "Отключить здешнюю: <code>/disable_auto</code>" + FOOTER_LINK)
+    msg = await update.message.reply_text(text, parse_mode='HTML')
+    manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+
+
+@with_cleanup
 async def disable_auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manager = DatabaseManager()
-    chat_id, thread_id = dest_key(update)
-    sub = manager.get_subscription(chat_id, thread_id)
-    if not sub:
-        text = "Для этого чата ничего не настроено." + FOOTER_LINK
+    user_id = update.effective_user.id
+
+    if context.args and context.args[0].isdigit():
+        sub = manager.get_subscription_by_id(int(context.args[0]))
+        if not sub or sub.get("created_by") != user_id:
+            text = ("Автоотправка с таким номером не найдена.\n"
+                    "Список: <code>/autosends</code>" + FOOTER_LINK)
+        else:
+            manager.set_auto_by_id(sub["id"], False)
+            text = (f"Автоотправка выключена:\n"
+                    f"{esc(describe_place(sub))} — "
+                    f"{esc(sub.get('group_name') or 'без группы')}" + FOOTER_LINK)
     else:
-        manager.set_auto(chat_id, thread_id, False)
-        text = "Автоотправка выключена." + FOOTER_LINK
+        chat_id, thread_id = dest_key(update)
+        sub = manager.get_subscription(chat_id, thread_id)
+        if not sub:
+            text = "Для этого чата ничего не настроено." + FOOTER_LINK
+        elif not sub.get("auto_enabled"):
+            text = "Здесь автоотправка и так выключена." + FOOTER_LINK
+        else:
+            manager.set_auto(chat_id, thread_id, False)
+            text = "Автоотправка выключена." + FOOTER_LINK
+
     msg = await update.message.reply_text(text, parse_mode='HTML')
-    manager.save_message(chat_id, update.effective_user.id, msg.message_id)
+    manager.save_message(update.effective_chat.id, user_id, msg.message_id)
 
 @with_cleanup
 async def sendtext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1125,6 +1268,7 @@ def main():
     app.add_handler(CommandHandler("day", day_cmd))
     app.add_handler(CommandHandler("week", week_cmd))
     app.add_handler(CommandHandler("setchat", setchat_cmd))
+    app.add_handler(CommandHandler("autosends", autosends_cmd))
     app.add_handler(CommandHandler("disable_auto", disable_auto_cmd))
     app.add_handler(CommandHandler("now", now_cmd))
 
