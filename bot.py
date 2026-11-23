@@ -17,7 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "diag-1 group-page-id"
+BUILD = "diag-2 portable-upsert"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
@@ -127,15 +127,16 @@ class DatabaseManager:
 
     def set_group(self, chat_id, thread_id, group_id, group_name, user_id=None):
         with sqlite3.connect(DB_PATH) as conn:
-            conn.execute('''
-                INSERT INTO subscriptions (chat_id, thread_id, group_id, group_name, created_by, updated_at)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(chat_id, thread_id) DO UPDATE SET
-                    group_id = excluded.group_id,
-                    group_name = excluded.group_name,
-                    created_by = excluded.created_by,
-                    updated_at = CURRENT_TIMESTAMP
-            ''', (chat_id, thread_id, group_id, group_name, user_id))
+            conn.execute(
+                'INSERT OR IGNORE INTO subscriptions (chat_id, thread_id, group_id, group_name, created_by) '
+                'VALUES (?, ?, ?, ?, ?)',
+                (chat_id, thread_id, group_id, group_name, user_id)
+            )
+            conn.execute(
+                'UPDATE subscriptions SET group_id = ?, group_name = ?, created_by = ?, '
+                'updated_at = CURRENT_TIMESTAMP WHERE chat_id = ? AND thread_id = ?',
+                (group_id, group_name, user_id, chat_id, thread_id)
+            )
 
     def get_subscription(self, chat_id, thread_id):
         with sqlite3.connect(DB_PATH) as conn:
