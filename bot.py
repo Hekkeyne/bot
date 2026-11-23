@@ -17,7 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "diag-3 escape-html"
+BUILD = "diag-4 proxy"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
@@ -552,7 +552,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += "Включить: <code>/setchat</code>\n"
 
     health = await asyncio.to_thread(ss.check_site)
-    text += (f"\nСайт расписания: {html.escape(health)}\n"
+    text += (f"\nСайт расписания: {esc(health)}\n"
+             f"Источник: {ss.source_label()}\n"
              f"Сборка: <code>{BUILD}</code>")
     text += group_link(sub.get("group_id") if sub else None)
     msg = await update.message.reply_text(text, parse_mode='HTML')

@@ -1,8 +1,10 @@
 import re
+import os
 import time
 import json
 import threading
 import datetime
+from urllib.parse import quote, urlencode
 
 import requests
 from bs4 import BeautifulSoup
@@ -11,6 +13,31 @@ BASE_URL = "https://timetable.pallada.sibsau.ru"
 SEARCH_URL = BASE_URL + "/ajax/search_schedule"
 GROUP_URL = BASE_URL + "/timetable/group/{group_id}"
 GROUP_PAGE_RE = re.compile(r"/timetable/group/(\d+)")
+
+PROXY_URL = (os.getenv("SCHEDULE_PROXY") or "").strip().rstrip("/")
+PROXY_TOKEN = (os.getenv("SCHEDULE_PROXY_TOKEN") or "").strip()
+
+
+def proxy_url(action, **params):
+    if not PROXY_URL:
+        return ""
+    if PROXY_TOKEN:
+        params["token"] = PROXY_TOKEN
+    return PROXY_URL + "?" + urlencode(dict(action=action, **params))
+
+
+def source_label():
+    return "прокси" if PROXY_URL else "напрямую"
+
+
+def _error_text(response):
+    try:
+        data = response.json()
+        if isinstance(data, dict) and data.get("error"):
+            return str(data["error"])
+    except ValueError:
+        pass
+    return "HTTP %s" % response.status_code
 
 HEADERS = {
     "User-Agent": (
@@ -56,9 +83,11 @@ def search_groups(query, session=None):
     query = (query or "").strip()
     session = session or _session()
     payload = {"jsonrpc": "2.0", "method": "call", "params": {"query": query}, "id": 1}
+    url = proxy_url("search") or SEARCH_URL
     try:
-        response = session.post(SEARCH_URL, json=payload, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
+        response = session.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+        if response.status_code != 200:
+            raise ScheduleError("Не удалось обратиться к поиску групп: %s" % _error_text(response))
         body = response.json()
     except (requests.RequestException, ValueError) as exc:
         raise ScheduleError("Не удалось обратиться к поиску групп: %s" % exc) from exc
@@ -75,6 +104,20 @@ def search_groups(query, session=None):
 
 def group_page_id(search_id, query, session=None):
     session = session or _session()
+
+    if PROXY_URL:
+        url = proxy_url("resolve", id=search_id, q=query)
+        try:
+            response = session.get(url, timeout=REQUEST_TIMEOUT)
+            data = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise ScheduleError("Не удалось определить страницу группы %s: %s"
+                                % (search_id, exc)) from exc
+        if response.status_code != 200 or not data.get("page_id"):
+            raise ScheduleError("Не удалось определить страницу группы %s: %s"
+                                % (search_id, _error_text(response)))
+        return int(data["page_id"])
+
     try:
         page = session.get(BASE_URL + "/timetable", timeout=REQUEST_TIMEOUT)
         page.raise_for_status()
@@ -108,10 +151,12 @@ def find_group(query):
 
 def fetch_group_html(group_id, session=None):
     session = session or _session()
-    url = GROUP_URL.format(group_id=group_id)
+    url = proxy_url("page", id=group_id) or GROUP_URL.format(group_id=group_id)
     try:
         response = session.get(url, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
+        if response.status_code != 200:
+            raise ScheduleError("Не удалось загрузить страницу группы %s: %s"
+                                % (group_id, _error_text(response)))
     except requests.RequestException as exc:
         raise ScheduleError("Не удалось загрузить страницу группы %s: %s" % (group_id, exc)) from exc
     return response.text
