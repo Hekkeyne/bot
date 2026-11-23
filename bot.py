@@ -17,7 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "diag-9 clean"
+BUILD = "diag-10 sendall"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
@@ -397,7 +397,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/nearexam — ближайший экзамен\n\n"
         "<b>Автоотправка:</b>\n"
         "/setchat — публиковать расписание в этот чат после последней пары\n"
-        "/autosends — список всех автоотправок с номерами\n"
         "/disable_auto — выключить здесь или по номеру: /disable_auto 2\n"
         + FOOTER_LINK
     )
@@ -688,33 +687,14 @@ async def disable_auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(text, parse_mode='HTML')
     manager.save_message(update.effective_chat.id, user_id, msg.message_id)
 
-@with_cleanup
-async def sendtext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    manager = DatabaseManager()
+def parse_id_list(value):
+    compact = value.replace(",", "")
+    if not compact.isdigit():
+        return None
+    return [int(part) for part in value.split(",") if part]
 
-    if not context.args:
-        msg = await update.message.reply_text(
-            "<b>Ошибка</b>\n\n"
-            "Укажите текст для отправки.\n"
-            "Пример: <code>/sendtext Всем привет, встречаемся в 15:00!</code>" + FOOTER_LINK,
-            parse_mode='HTML'
-        )
-        manager.save_message(update.effective_chat.id, user_id, msg.message_id)
-        return
 
-    text_to_send = " ".join(context.args)
-    subs = manager.get_subscriptions_by(user_id)
-    if not subs:
-        msg = await update.message.reply_text(
-            "<b>Ошибка</b>\n\n"
-            "Вы ещё не настроили ни одного чата.\n"
-            "Задайте группу командой <code>/group</code>." + FOOTER_LINK,
-            parse_mode='HTML'
-        )
-        manager.save_message(update.effective_chat.id, user_id, msg.message_id)
-        return
-
+async def send_text_to_subs(context, subs, text_to_send):
     sent = 0
     failed = 0
     for sub in subs:
@@ -725,10 +705,46 @@ async def sendtext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(**kwargs)
             sent += 1
         except Exception as e:
-            logging.warning("sendtext: не удалось отправить в чат %s: %s", sub["chat_id"], e)
+            logging.warning("Не удалось отправить в чат %s: %s", sub["chat_id"], e)
             failed += 1
         await asyncio.sleep(1)
+    return sent, failed
 
+
+@with_cleanup
+async def sendtext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    manager = DatabaseManager()
+    args = list(context.args)
+
+    ids = parse_id_list(args[0]) if args else None
+    if not ids or len(args) < 2:
+        msg = await update.message.reply_text(
+            "<b>Ошибка</b>\n\n"
+            "Сначала номер, потом текст: <code>/sendtext 1,3 Занятие перенесено на 15:00</code>\n"
+            "Всем сразу: <code>/sendall Занятие перенесено на 15:00</code>" + FOOTER_LINK,
+            parse_mode='HTML'
+        )
+        manager.save_message(update.effective_chat.id, user_id, msg.message_id)
+        return
+
+    text_to_send = " ".join(args[1:])
+    subs = []
+    for sub_id in ids:
+        sub = manager.get_subscription_by_id(sub_id)
+        if sub and sub.get("created_by") == user_id:
+            subs.append(sub)
+
+    if not subs:
+        msg = await update.message.reply_text(
+            "Автоотправки с такими номерами не найдены.\n"
+            "Список: <code>/autosends</code>" + FOOTER_LINK,
+            parse_mode='HTML'
+        )
+        manager.save_message(update.effective_chat.id, user_id, msg.message_id)
+        return
+
+    sent, failed = await send_text_to_subs(context, subs, text_to_send)
     msg = await update.message.reply_text(
         f"<b>Отправлено</b>\n\n"
         f"Доставлено: {sent}\n"
@@ -737,10 +753,37 @@ async def sendtext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     manager.save_message(update.effective_chat.id, user_id, msg.message_id)
 
+
 @with_cleanup
-async def now_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("Бот работает!" + FOOTER_LINK, parse_mode='HTML')
-    DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+async def sendall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    manager = DatabaseManager()
+
+    if not context.args:
+        msg = await update.message.reply_text(
+            "Укажите текст: <code>/sendall Занятие перенесено на 15:00</code>" + FOOTER_LINK,
+            parse_mode='HTML'
+        )
+        manager.save_message(update.effective_chat.id, user_id, msg.message_id)
+        return
+
+    subs = manager.get_subscriptions_by(user_id)
+    if not subs:
+        msg = await update.message.reply_text(
+            "Вы ещё не настроили ни одного чата." + FOOTER_LINK,
+            parse_mode='HTML'
+        )
+        manager.save_message(update.effective_chat.id, user_id, msg.message_id)
+        return
+
+    sent, failed = await send_text_to_subs(context, subs, " ".join(context.args))
+    msg = await update.message.reply_text(
+        f"<b>Отправлено</b>\n\n"
+        f"Доставлено: {sent}\n"
+        f"Ошибок: {failed}" + FOOTER_LINK,
+        parse_mode='HTML'
+    )
+    manager.save_message(update.effective_chat.id, user_id, msg.message_id)
 
 @with_cleanup
 async def exams_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -965,9 +1008,9 @@ def main():
     app.add_handler(CommandHandler("setchat", setchat_cmd))
     app.add_handler(CommandHandler("autosends", autosends_cmd))
     app.add_handler(CommandHandler("disable_auto", disable_auto_cmd))
-    app.add_handler(CommandHandler("now", now_cmd))
 
     app.add_handler(CommandHandler("sendtext", sendtext_cmd))
+    app.add_handler(CommandHandler("sendall", sendall_cmd))
 
     app.add_handler(CommandHandler("exams", exams_cmd))
     app.add_handler(CommandHandler("nearexam", nearexam_cmd))
