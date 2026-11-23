@@ -242,6 +242,14 @@ def load_schedule(group_id, session=None):
     return parse_group_html(fetch_group_html(group_id, session=session))
 
 
+def check_site():
+    try:
+        groups = search_groups("")
+    except Exception as exc:
+        return "недоступен (%s)" % exc
+    return "доступен, групп получено: %d" % len(groups)
+
+
 def get_schedule(group_id, force=False, ttl=CACHE_TTL):
     now = time.time()
     with _cache_lock:

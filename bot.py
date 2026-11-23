@@ -4,6 +4,7 @@ import logging
 import asyncio
 import os
 import time
+import html
 
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram import Update
@@ -15,6 +16,8 @@ import schedule_source as ss
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
+
+BUILD = "diag-1 group-page-id"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
@@ -353,6 +356,19 @@ def with_cleanup(handler):
         return await handler(update, context)
     return wrapper
 
+async def error_handler(update, context):
+    logging.error("Ошибка в обработчике", exc_info=context.error)
+    message = update.effective_message if update else None
+    if message is None:
+        return
+    detail = html.escape(str(context.error))[:300]
+    text = (f"<b>Внутренняя ошибка</b>\n"
+            f"<code>{type(context.error).__name__}: {detail}</code>")
+    try:
+        await message.reply_text(text, parse_mode='HTML')
+    except Exception as exc:
+        logging.error("Не удалось сообщить об ошибке: %s", exc)
+
 @with_cleanup
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -517,19 +533,23 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manager = DatabaseManager()
     chat_id, thread_id = dest_key(update)
     sub = manager.get_subscription(chat_id, thread_id)
+    text = "<b>Статус</b>\n\n"
     if not sub or not sub.get("group_id"):
-        text = ("Для этого чата группа не задана.\n"
-                "Задайте её командой <code>/group БПА24-01</code>." + FOOTER_LINK)
+        text += ("Группа для этого чата не задана.\n"
+                 "Задайте её командой <code>/group БПА24-01</code>.\n")
     else:
         auto = "включена" if sub.get("auto_enabled") else "выключена"
-        text = (f"<b>Настройки этого чата</b>\n\n"
-                f"Группа: <code>{sub['group_name']}</code>\n"
-                f"Автоотправка: {auto}\n")
+        text += (f"Группа: <code>{sub['group_name']}</code>\n"
+                 f"Автоотправка: {auto}\n")
         if sub.get("auto_enabled"):
-            text += "Отправка: после последней пары → расписание на завтра"
+            text += "Отправка: после последней пары → расписание на завтра\n"
         else:
-            text += "Включить: <code>/setchat</code>"
-        text += group_link(sub.get("group_id"))
+            text += "Включить: <code>/setchat</code>\n"
+
+    health = await asyncio.to_thread(ss.check_site)
+    text += (f"\nСайт расписания: {html.escape(health)}\n"
+             f"Сборка: <code>{BUILD}</code>")
+    text += group_link(sub.get("group_id") if sub else None)
     msg = await update.message.reply_text(text, parse_mode='HTML')
     manager.save_message(chat_id, update.effective_user.id, msg.message_id)
 
@@ -1109,6 +1129,8 @@ def main():
     app.add_handler(CommandHandler("setexam", setexam_cmd))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_text_handler))
+
+    app.add_error_handler(error_handler)
 
     print("Бот запущен!")
     app.run_polling()
