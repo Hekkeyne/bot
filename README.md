@@ -29,20 +29,26 @@
 (@BotFather → `/setprivacy` → Disable) либо пользователь отвечает на сообщение
 бота. Команда `/group` работает всегда.
 
-## Если сайт вуза недоступен с хостинга бота
+## Источник расписания
 
-Некоторые сети (например, Railway) не могут подключиться к
-`timetable.pallada.sibsau.ru` — соединение по 443 порту отваливается по таймауту.
-Тогда бот ходит на сайт через прокси на своём хостинге.
+По умолчанию бот ходит на сайт вуза через прокси на своём хостинге:
 
-1. Загрузить `hosting/timetable.php` на хостинг, например в
-   `https://hekkeyne.ru/api/timetable.php`.
-2. Проверить в браузере:
-   `https://hekkeyne.ru/api/timetable.php?action=search&q=БПА24`
-   Должен вернуться JSON со списком групп.
-3. В Railway добавить переменные окружения:
-   - `SCHEDULE_PROXY=https://hekkeyne.ru/api/timetable.php`
-   - при желании `SCHEDULE_PROXY_TOKEN=<секрет>` и такой же `TOKEN` в начале
-     `timetable.php` — тогда прокси не будет открыт всем.
-4. Перезапустить бота и проверить `/status`: должно быть «Источник: прокси»
-   и «Сайт расписания: доступен».
+```
+https://hekkeyne.ru/timetable-api/timetable.php
+```
+
+Это нужно потому, что с Railway сайт вуза недоступен (соединение по 443 порту
+отваливается по таймауту), а SpaceWeb до него дотягивается.
+
+Сам прокси — файл `hosting/timetable.php`, лежит в `public_html/timetable-api/`.
+Он умеет три вещи:
+
+- `?action=search&q=БПА24` — поиск групп через `/ajax/search_schedule`;
+- `?action=resolve&id=1157&q=БПА24-01` — id страницы расписания (`page_id`);
+- `?action=page&id=13922` — HTML страницы группы.
+
+Переопределение через переменные окружения:
+
+- `SCHEDULE_PROXY` — другой адрес прокси, либо `direct` чтобы ходить на сайт
+  напрямую;
+- `SCHEDULE_PROXY_TOKEN` — если в начале `timetable.php` задан `TOKEN`.

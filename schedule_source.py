@@ -14,7 +14,12 @@ SEARCH_URL = BASE_URL + "/ajax/search_schedule"
 GROUP_URL = BASE_URL + "/timetable/group/{group_id}"
 GROUP_PAGE_RE = re.compile(r"/timetable/group/(\d+)")
 
-PROXY_URL = (os.getenv("SCHEDULE_PROXY") or "").strip().rstrip("/")
+DEFAULT_PROXY = "https://hekkeyne.ru/timetable-api/timetable.php"
+_PROXY_ENV = (os.getenv("SCHEDULE_PROXY") or "").strip()
+if _PROXY_ENV.lower() in ("off", "none", "direct"):
+    PROXY_URL = ""
+else:
+    PROXY_URL = (_PROXY_ENV or DEFAULT_PROXY).rstrip("/")
 PROXY_TOKEN = (os.getenv("SCHEDULE_PROXY_TOKEN") or "").strip()
 
 

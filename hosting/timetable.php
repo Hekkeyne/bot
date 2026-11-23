@@ -99,9 +99,10 @@ try {
 
         $cookies = tempnam(sys_get_temp_dir(), 'tt');
         try {
-            $page = request(SITE . '/timetable', [
+            $page = request(SITE . '/timetable/', [
                 CURLOPT_COOKIEJAR => $cookies,
                 CURLOPT_COOKIEFILE => $cookies,
+                CURLOPT_FOLLOWLOCATION => true,
             ]);
             if (!preg_match('/name="csrf_token"[^>]*value="([^"]+)"/', $page['body'], $match)) {
                 fail('не удалось получить csrf_token');
