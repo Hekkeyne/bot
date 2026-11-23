@@ -18,7 +18,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "diag-12 teacher-links"
+BUILD = "diag-13 teacher-full"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
@@ -929,15 +929,19 @@ def warm_up():
 def teacher_html(item):
     links = item.get("teacher_links") or []
     if not links:
-        return esc(ss.display_teacher(item.get("teacher", "")))
+        return esc(item.get("teacher", ""))
     parts = []
     for link in links:
-        name = esc(ss.display_teacher(link.get("name", "")))
-        teacher_id = link.get("id")
-        if teacher_id:
-            parts.append(f'<a href="{ss.BASE_URL}/timetable/professor/{teacher_id}">{name}</a>')
-        else:
-            parts.append(name)
+        options = ss.teacher_options(link.get("name", ""), link.get("id"))
+        rendered = []
+        for option in options:
+            text = esc(option["text"])
+            target = option.get("id")
+            if target:
+                rendered.append(f'<a href="{ss.BASE_URL}/timetable/professor/{target}">{text}</a>')
+            else:
+                rendered.append(text)
+        parts.append(" или ".join(rendered) if len(rendered) > 1 else rendered[0])
     return ", ".join(parts)
 
 

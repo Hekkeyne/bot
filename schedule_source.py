@@ -13,8 +13,6 @@ from bs4 import BeautifulSoup
 
 BASE_URL = "https://timetable.pallada.sibsau.ru"
 SEARCH_URL = BASE_URL + "/ajax/search_schedule"
-GROUP_URL = BASE_URL + "/timetable/group/{group_id}"
-GROUP_PAGE_RE = re.compile(r"/timetable/group/(\d+)")
 
 DEFAULT_PROXY = "https://hekkeyne.ru/timetable-api/timetable.php"
 _PROXY_ENV = (os.getenv("SCHEDULE_PROXY") or "").strip()
@@ -101,20 +99,20 @@ def search_groups(query, session=None):
         raise ScheduleError("Неожиданный ответ поиска групп") from exc
     return [{"id": int(g["id"]), "name": _clean(g["name"])} for g in groups]
 
-def group_page_id(search_id, query, session=None):
+def page_id(search_id, query, kind="group", session=None):
     session = session or _session()
+    title = "преподавателя" if kind == "professor" else "группы"
 
     if PROXY_URL:
-        url = proxy_url("resolve", id=search_id, q=query)
+        url = proxy_url("resolve", id=search_id, q=query, kind=kind)
         try:
             response = session.get(url, timeout=REQUEST_TIMEOUT)
             data = response.json()
         except (requests.RequestException, ValueError) as exc:
-            raise ScheduleError("Не удалось определить страницу группы %s: %s"
-                                % (search_id, exc)) from exc
+            raise ScheduleError("Не удалось определить страницу %s: %s" % (title, exc)) from exc
         if response.status_code != 200 or not data.get("page_id"):
-            raise ScheduleError("Не удалось определить страницу группы %s: %s"
-                                % (search_id, _error_text(response)))
+            raise ScheduleError("Не удалось определить страницу %s: %s"
+                                % (title, _error_text(response)))
         return int(data["page_id"])
 
     try:
@@ -129,15 +127,20 @@ def group_page_id(search_id, query, session=None):
             timeout=REQUEST_TIMEOUT,
         )
     except requests.RequestException as exc:
-        raise ScheduleError("Не удалось определить страницу группы %s: %s" % (search_id, exc)) from exc
+        raise ScheduleError("Не удалось определить страницу %s: %s" % (title, exc)) from exc
 
     location = response.headers.get("Location", "")
-    found = GROUP_PAGE_RE.search(location)
+    found = re.search(r"/timetable/%s/(\d+)" % kind, location)
     if not found:
-        if "/professor/" in location:
+        if kind == "group" and "/professor/" in location:
             raise ScheduleError("Это преподаватель, а не группа")
-        raise ScheduleError("Сайт не сообщил страницу группы %s" % search_id)
+        if kind == "professor" and "/group/" in location:
+            raise ScheduleError("Это группа, а не преподаватель")
+        raise ScheduleError("Сайт не сообщил страницу %s" % title)
     return int(found.group(1))
+
+def group_page_id(search_id, query, session=None):
+    return page_id(search_id, query, "group", session)
 
 def find_group(query):
     matches = search_groups(query)
@@ -148,17 +151,24 @@ def find_group(query):
         exact["page_id"] = group_page_id(exact["id"], exact["name"])
     return exact, matches
 
-def fetch_group_html(group_id, session=None):
+def fetch_page_html(page_id_value, kind="group", session=None):
     session = session or _session()
-    url = proxy_url("page", id=group_id) or GROUP_URL.format(group_id=group_id)
+    title = "преподавателя" if kind == "professor" else "группы"
+    if PROXY_URL:
+        url = proxy_url("page", id=page_id_value, kind=kind)
+    else:
+        url = BASE_URL + "/timetable/%s/%s" % (kind, page_id_value)
     try:
         response = session.get(url, timeout=REQUEST_TIMEOUT)
         if response.status_code != 200:
-            raise ScheduleError("Не удалось загрузить страницу группы %s: %s"
-                                % (group_id, _error_text(response)))
+            raise ScheduleError("Не удалось загрузить страницу %s: %s"
+                                % (title, _error_text(response)))
     except requests.RequestException as exc:
-        raise ScheduleError("Не удалось загрузить страницу группы %s: %s" % (group_id, exc)) from exc
+        raise ScheduleError("Не удалось загрузить страницу %s: %s" % (title, exc)) from exc
     return response.text
+
+def fetch_group_html(group_id, session=None):
+    return fetch_page_html(group_id, "group", session)
 
 def _parse_lesson(ul):
     subject = ""
@@ -346,11 +356,15 @@ def _split_short(name):
         return "", []
     return parts[0], [part[0] for part in parts[1:]]
 
-def _match_teacher(short, candidates):
+def _name_without_surname(full_name):
+    words = (full_name or "").split()
+    return " ".join(words[1:]) if len(words) > 1 else (full_name or "")
+
+def _match_candidates(short, candidates):
     surname, initials = _split_short(short)
     if not surname:
-        return None
-    matches = []
+        return []
+    found = []
     for candidate in candidates:
         words = candidate["name"].split()
         if len(words) < 1 + len(initials):
@@ -359,76 +373,83 @@ def _match_teacher(short, candidates):
             continue
         if all(words[1 + index][0].upper() == initials[index].upper()
                for index in range(len(initials))):
-            matches.append(candidate["name"])
-    if len(matches) == 1:
-        return matches[0]
-    return None
+            found.append(candidate)
+    return found
 
-def resolve_teacher(short, session=None):
-    key = _clean(short)
-    if not key:
-        return ""
+def resolve_teacher(short, teacher_id):
+    short = _clean(short)
+    key = (short, teacher_id)
     with _teacher_lock:
         if key in _teacher_cache:
             return _teacher_cache[key]
 
-    surname, initials = _split_short(key)
-    full = key
+    options = [{"text": short, "id": teacher_id}]
+    surname, initials = _split_short(short)
     if surname:
         query = surname if not initials else "%s %s" % (surname, initials[0])
         try:
-            candidates = search_groups(query, session=session)
+            candidates = _match_candidates(short, search_groups(query))
         except ScheduleError:
-            return key
-        matched = _match_teacher(key, candidates)
-        if matched:
-            full = matched
+            candidates = []
+
+        if len(candidates) == 1:
+            options = [{"text": candidates[0]["name"], "id": teacher_id}]
+        elif len(candidates) > 1:
+            resolved = []
+            for candidate in candidates:
+                try:
+                    candidate_page = page_id(candidate["id"], candidate["name"], "professor")
+                except ScheduleError:
+                    candidate_page = None
+                resolved.append({"name": candidate["name"], "page": candidate_page})
+
+            exact = next((item for item in resolved if item["page"] == teacher_id), None)
+            if exact:
+                options = [{"text": exact["name"], "id": teacher_id}]
+            else:
+                options = [{"text": _name_without_surname(item["name"]),
+                            "id": item["page"] or teacher_id} for item in resolved]
 
     with _teacher_lock:
-        _teacher_cache[key] = full
-    return full
+        _teacher_cache[key] = options
+    return options
 
-def _teacher_parts(value):
-    return [part.strip() for part in (value or "").split(",") if part.strip()]
+def teacher_options(short, teacher_id):
+    with _teacher_lock:
+        options = _teacher_cache.get((_clean(short), teacher_id))
+    if options:
+        return options
+    return [{"text": _clean(short), "id": teacher_id}]
 
-def resolve_teachers(values):
-    pending = set()
-    for value in values:
-        for part in _teacher_parts(value):
-            with _teacher_lock:
-                if part not in _teacher_cache:
-                    pending.add(part)
-    if not pending:
-        return
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-        list(pool.map(resolve_teacher, pending))
-
-def display_teacher(value):
-    if not value:
-        return ""
-    parts = []
-    for part in _teacher_parts(value):
-        with _teacher_lock:
-            full = _teacher_cache.get(part)
-        if full and full != part:
-            words = full.split()
-            guess = " ".join(words[1:]) if len(words) > 1 else full
-            parts.append("%s (возм. %s)" % (part, guess))
-        else:
-            parts.append(part)
-    return ", ".join(parts)
+def _lesson_teachers(lesson):
+    links = lesson.get("teacher_links") or []
+    if links:
+        return [(link["name"], link.get("id")) for link in links if link.get("name")]
+    if lesson.get("teacher"):
+        return [(lesson["teacher"], None)]
+    return []
 
 def collect_teachers(schedule):
-    names = []
+    entries = []
     for week in (schedule.get("weeks") or {}).values():
         for lessons in week.values():
             for lesson in lessons:
-                if lesson.get("teacher"):
-                    names.append(lesson["teacher"])
+                entries.extend(_lesson_teachers(lesson))
     for exam in schedule.get("exams") or []:
-        if exam.get("teacher"):
-            names.append(exam["teacher"])
-    return names
+        entries.extend(_lesson_teachers(exam))
+    return entries
+
+def resolve_teachers(entries):
+    pending = set()
+    for short, teacher_id in entries:
+        key = (_clean(short), teacher_id)
+        with _teacher_lock:
+            if key not in _teacher_cache:
+                pending.add(key)
+    if not pending:
+        return
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(lambda item: resolve_teacher(item[0], item[1]), pending))
 
 _resolving = set()
 _resolving_lock = threading.Lock()

@@ -93,6 +93,9 @@ try {
     if ($action === 'resolve') {
         $id = (int) ($_GET['id'] ?? 0);
         $query = (string) ($_GET['q'] ?? '');
+        $kind = (string) ($_GET['kind'] ?? 'group');
+        $kind = $kind === 'professor' ? 'professor' : 'group';
+        $title = $kind === 'professor' ? 'преподавателя' : 'группы';
         if ($id <= 0 || $query === '') {
             fail('нужны параметры id и q', 400);
         }
@@ -124,11 +127,14 @@ try {
         }
 
         $location = header_value($posted['headers'], 'Location');
-        if (!preg_match('#/timetable/group/(\d+)#', $location, $found)) {
-            if (strpos($location, '/professor/') !== false) {
+        if (!preg_match('#/timetable/' . $kind . '/(\d+)#', $location, $found)) {
+            if ($kind === 'group' && strpos($location, '/professor/') !== false) {
                 fail('это преподаватель, а не группа', 400);
             }
-            fail('сайт не сообщил страницу группы');
+            if ($kind === 'professor' && strpos($location, '/group/') !== false) {
+                fail('это группа, а не преподаватель', 400);
+            }
+            fail('сайт не сообщил страницу ' . $title);
         }
         $body = json_encode(['page_id' => (int) $found[1]], JSON_UNESCAPED_UNICODE);
         send(200, $body === false ? '{"page_id":0}' : $body, 'application/json; charset=utf-8');
@@ -136,10 +142,12 @@ try {
 
     if ($action === 'page') {
         $id = (int) ($_GET['id'] ?? 0);
+        $kind = (string) ($_GET['kind'] ?? 'group');
+        $kind = $kind === 'professor' ? 'professor' : 'group';
         if ($id <= 0) {
             fail('нужен параметр id', 400);
         }
-        $result = request(SITE . '/timetable/group/' . $id);
+        $result = request(SITE . '/timetable/' . $kind . '/' . $id);
         if ($result['status'] !== 200) {
             fail('сайт вернул код ' . $result['status']);
         }
