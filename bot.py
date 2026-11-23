@@ -18,7 +18,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "diag-11 fullnames"
+BUILD = "diag-12 teacher-links"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
@@ -314,7 +314,7 @@ def format_exams_list(schedule, sub):
             left = ""
         text += (f"<b>{esc(exam['subject'])}</b> ({esc(exam['type'])})\n"
                  f"{esc(exam['date'])} в {esc(exam['time'])}, {left}\n"
-                 f"{esc(ss.display_teacher(exam['teacher']))}\n"
+                 f"{teacher_html(exam)}\n"
                  f"{esc(exam['room'])}\n\n")
     return text.strip() + group_link(sub.get("group_id"))
 
@@ -345,7 +345,7 @@ def format_nearest_exam(schedule, sub):
     text += (f"{left}\n\n"
              f"<b>{esc(exam['subject'])}</b> ({esc(exam['type'])})\n"
              f"{esc(exam['date'])} в {esc(exam['time'])}\n"
-             f"{esc(ss.display_teacher(exam['teacher']))}\n"
+             f"{teacher_html(exam)}\n"
              f"{esc(exam['room'])}")
     return text + group_link(sub.get("group_id"))
 
@@ -926,9 +926,24 @@ def warm_up():
         except Exception as exc:
             logging.warning("Прогрев группы %s не удался: %s", sub["group_id"], exc)
 
+def teacher_html(item):
+    links = item.get("teacher_links") or []
+    if not links:
+        return esc(ss.display_teacher(item.get("teacher", "")))
+    parts = []
+    for link in links:
+        name = esc(ss.display_teacher(link.get("name", "")))
+        teacher_id = link.get("id")
+        if teacher_id:
+            parts.append(f'<a href="{ss.BASE_URL}/timetable/professor/{teacher_id}">{name}</a>')
+        else:
+            parts.append(name)
+    return ", ".join(parts)
+
+
 def lesson_block(lesson):
     return (f"<b>{esc(lesson['subject'])}</b> ({esc(lesson['type'])})\n"
-            f"{esc(ss.display_teacher(lesson['teacher']))}\n"
+            f"{teacher_html(lesson)}\n"
             f"{esc(lesson['room'])}\n\n")
 
 def format_schedule(schedule, sub, date):

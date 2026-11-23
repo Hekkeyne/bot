@@ -164,6 +164,7 @@ def _parse_lesson(ul):
     subject = ""
     lesson_type = ""
     teacher = ""
+    teacher_links = []
     room = ""
     address = ""
     subgroup = "все"
@@ -179,7 +180,13 @@ def _parse_lesson(ul):
     if user_icon:
         parent_li = user_icon.find_parent("li")
         if parent_li:
-            teacher = _clean(", ".join(a.get_text() for a in parent_li.find_all("a")))
+            for link in parent_li.find_all("a"):
+                name = _clean(link.get_text())
+                if not name:
+                    continue
+                match = re.search(r"/timetable/professor/(\d+)", link.get("href") or "")
+                teacher_links.append({"name": name, "id": int(match.group(1)) if match else None})
+            teacher = ", ".join(item["name"] for item in teacher_links)
 
     compass_icon = ul.find("i", class_=lambda c: c and "fa-compass" in c)
     if compass_icon:
@@ -204,6 +211,7 @@ def _parse_lesson(ul):
         "subject": subject,
         "type": lesson_type,
         "teacher": teacher,
+        "teacher_links": teacher_links,
         "room": room,
         "address": address,
         "subgroup": subgroup,
@@ -239,6 +247,7 @@ def _parse_session(tab):
                     "subject": lesson["subject"],
                     "type": lesson["type"],
                     "teacher": lesson["teacher"],
+                    "teacher_links": lesson["teacher_links"],
                     "room": lesson["room"],
                 })
     return exams
