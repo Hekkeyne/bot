@@ -7,21 +7,19 @@ import time
 import html
 import threading
 
-import requests
-
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram import Update
 from telegram.error import BadRequest, Forbidden
 import pytz
 
 import schedule_source as ss
-import rich_text as rt
+import widget as wg
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "rich-1 ptb22"
+BUILD = "widget-1 ptb22"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 SITE_URL = "https://hekkeyne.ru/timetable/"
@@ -37,9 +35,6 @@ LEGACY_GROUP_NAME = "БПА24-01"
 
 PENDING_GROUP = {}
 
-RICH_ENDPOINT = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendRichMessage"
-
-
 def group_link(group_id, group_name=None):
     ours = ss.site_link(group_name) if group_name else SITE_URL
     pallada = f"{TIMETABLE_URL}/group/{group_id}" if group_id else TIMETABLE_URL
@@ -47,39 +42,29 @@ def group_link(group_id, group_name=None):
             f'\n<a href="{pallada}">Полное расписание Паллада СибГУ</a>')
 
 
-def send_rich_message(chat_id, rich_html, thread_id=0, reply_to=None):
-    payload = {"chat_id": chat_id, "rich_message": {"html": rich_html}}
-    if thread_id:
-        payload["message_thread_id"] = thread_id
-    if reply_to:
-        payload["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
-
-    response = requests.post(RICH_ENDPOINT, json=payload, timeout=30)
-    data = response.json()
-    if not data.get("ok"):
-        raise RuntimeError(str(data.get("description") or "ошибка sendRichMessage"))
-    return int(data["result"]["message_id"])
-
-
 async def reply_plain(update, manager, text):
     msg = await update.message.reply_text(text, parse_mode='HTML')
     manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 
-async def reply_message(update, manager, plain_html, rich_html):
+async def deliver_day(update, manager, schedule, sub, date, header=None):
     chat_id, thread_id = dest_key(update)
-    user_id = update.effective_user.id
-    message_id = None
-    try:
-        message_id = await asyncio.to_thread(
-            send_rich_message, chat_id, rich_html, thread_id, update.effective_message.message_id)
-    except Exception as exc:
-        logging.warning("Rich-сообщение не ушло (%s), отправляю обычное", exc)
+    group = sub.get("group_name") or ""
+    stamp = date.strftime("%d.%m.%Y")
+    if chat_id > 0:
+        caption = f"{header} · {stamp}" if header else f"Расписание {group} на {stamp}"
+        try:
+            message_id = await asyncio.to_thread(
+                wg.send_widget_day, chat_id, schedule, sub, date, caption, thread_id)
+            manager.save_message(chat_id, update.effective_user.id, message_id)
+            return
+        except Exception as exc:
+            logging.warning("Виджет не ушёл (%s), отправляю текст", exc)
 
-    if message_id is None:
-        msg = await update.message.reply_text(plain_html, parse_mode='HTML')
-        message_id = msg.message_id
-    manager.save_message(chat_id, user_id, message_id)
+    text = format_schedule(schedule, sub, date)
+    if header:
+        text = f"<b>{esc(header)}</b>\n\n" + text
+    await reply_plain(update, manager, text)
 
 def esc(value):
     return html.escape(str(value if value is not None else ""))
@@ -464,8 +449,7 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await reply_message(update, manager, format_schedule(schedule, sub, today),
-                        rt.day(schedule, sub, today))
+    await deliver_day(update, manager, schedule, sub, today)
 
 @with_cleanup
 async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -481,8 +465,7 @@ async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await reply_message(update, manager, format_schedule(schedule, sub, tmr),
-                        rt.day(schedule, sub, tmr))
+    await reply_plain(update, manager, format_schedule(schedule, sub, tmr))
 
 @with_cleanup
 async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -515,8 +498,7 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await reply_message(update, manager, format_schedule(schedule, sub, target),
-                        rt.day(schedule, sub, target))
+    await reply_plain(update, manager, format_schedule(schedule, sub, target))
 
 @with_cleanup
 async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -532,8 +514,7 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await reply_message(update, manager, format_week(schedule, sub, today),
-                        rt.week(schedule, sub, today))
+    await reply_plain(update, manager, format_week(schedule, sub, today))
 
 def describe_place(sub):
     chat_id = sub["chat_id"]
@@ -582,14 +563,8 @@ async def apply_group(update, chat_id, thread_id, query):
     sub = {"group_id": exact["id"], "group_name": exact["name"]}
     schedule = get_schedule_or_none(exact["id"])
     if schedule:
-        today = datetime.date.today()
-        text = (f"<b>Группа сохранена: {esc(exact['name'])}</b>\n"
-                f"Автоотправка после пар: <code>/setchat</code>\n\n"
-                + format_schedule(schedule, sub, today))
-        rich = (f"<h3>Группа сохранена: {esc(exact['name'])}</h3>\n"
-                f"<p>Автоотправка после пар: <code>/setchat</code></p>\n"
-                + rt.day(schedule, sub, today))
-        await reply_message(update, manager, text, rich)
+        await deliver_day(update, manager, schedule, sub, datetime.date.today(),
+                          header=f"Группа сохранена: {exact['name']}")
     else:
         msg = await update.message.reply_text(
             f"<b>Группа сохранена: {esc(exact['name'])}</b>\n\n"
@@ -846,8 +821,7 @@ async def exams_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await reply_message(update, manager, format_exams_list(schedule, sub),
-                        rt.exams(schedule, sub))
+    await reply_plain(update, manager, format_exams_list(schedule, sub))
 
 @with_cleanup
 async def nearexam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -862,18 +836,9 @@ async def nearexam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    exam, left = nearest_exam_info(schedule)
-    await reply_message(update, manager, format_nearest_exam(schedule, sub),
-                        rt.nearest_exam(schedule, sub, exam, left))
+    await reply_plain(update, manager, format_nearest_exam(schedule, sub))
 
 async def send_schedule_to(bot, sub, schedule, date):
-    rich = rt.day(schedule, sub, date)
-    try:
-        await asyncio.to_thread(send_rich_message, sub["chat_id"], rich, sub.get("thread_id") or 0)
-        return
-    except Exception as exc:
-        logging.warning("Rich-сообщение не ушло (%s), отправляю обычное", exc)
-
     text = format_schedule(schedule, sub, date)
     kwargs = {"chat_id": sub["chat_id"], "text": text, "parse_mode": "HTML"}
     if sub.get("thread_id"):
