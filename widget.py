@@ -50,7 +50,6 @@ body {
 .empty { color: var(--tg-theme-hint-color); margin: 8px 0 0; }
 .foot { margin-top: 10px; font-size: 0.85em; }
 .foot a { color: var(--tg-theme-link-color); text-decoration: none; }
-.foot i { color: var(--tg-theme-hint-color); font-style: normal; }
 </style>
 <div class="wrap">
   <div class="head">
@@ -62,7 +61,6 @@ body {
   <ul class="list" id="list"></ul>
   <div class="foot">
     <a id="site" href="https://hekkeyne.ru/timetable/">Наш сайт</a>
-    <i>·</i>
     <a id="pallada" href="https://timetable.pallada.sibsau.ru/timetable">Паллада</a>
   </div>
 </div>
@@ -147,7 +145,7 @@ function tgEscape(text) {
       if (details.length) {
         var metaEl = document.createElement("span");
         metaEl.className = "meta";
-        metaEl.textContent = details.join(" · ");
+        metaEl.textContent = details.join(", ");
         bodyEl.appendChild(metaEl);
       }
 
@@ -184,11 +182,11 @@ function tgEscape(text) {
       if (stale) {
         html = "данные за " + tgEscape(state.d || "");
       } else if (current) {
-        html = "сейчас · <b>" + tgEscape(current.s) + "</b> · до " + tgFromMinutes(current.b)
-          + " · <span class=\\"tick\\">" + tgCountdown((current.b - now.mins) * 60 - now.s) + "</span>";
+        html = "сейчас <b>" + tgEscape(current.s) + "</b> до " + tgFromMinutes(current.b)
+          + " <span class=\\"tick\\">" + tgCountdown((current.b - now.mins) * 60 - now.s) + "</span>";
       } else if (next) {
-        html = "скоро · <b>" + tgEscape(next.s) + "</b> · в " + tgFromMinutes(next.a)
-          + " · <span class=\\"tick\\">" + tgCountdown((next.a - now.mins) * 60 - now.s) + "</span>";
+        html = "скоро <b>" + tgEscape(next.s) + "</b> в " + tgFromMinutes(next.a)
+          + " <span class=\\"tick\\">" + tgCountdown((next.a - now.mins) * 60 - now.s) + "</span>";
       } else {
         html = rows.length ? "на сегодня пары закончились" : "пар нет";
       }

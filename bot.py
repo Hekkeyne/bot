@@ -52,7 +52,7 @@ async def deliver_day(update, manager, schedule, sub, date, header=None):
     group = sub.get("group_name") or ""
     stamp = date.strftime("%d.%m.%Y")
     if chat_id > 0:
-        caption = f"{header} · {stamp}" if header else f"Расписание {group} на {stamp}"
+        caption = f"{header}, {stamp}" if header else f"Расписание {group} на {stamp}"
         try:
             message_id = await asyncio.to_thread(
                 wg.send_widget_day, chat_id, schedule, sub, date, caption, thread_id)
