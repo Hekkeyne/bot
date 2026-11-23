@@ -3,504 +3,52 @@ import datetime
 import logging
 import asyncio
 import os
-from telegram.ext import Application, CommandHandler, ContextTypes
+import time
+
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram import Update
 from telegram.error import BadRequest, Forbidden
 import pytz
+
+import schedule_source as ss
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-FULL_SCHEDULE_LINK = "https://timetable.pallada.sibsau.ru/timetable/group/13922"
-FOOTER_LINK = f'\n\n<a href="{FULL_SCHEDULE_LINK}">Полное расписание на сайте</a>'
+TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
+FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
 KRASNOYARSK_TZ = pytz.timezone('Asia/Krasnoyarsk')
+DB_PATH = "schedule_bot.db"
+PUBLISH_DELAY_MINUTES = 2
+STALE_PUBLISH_LIMIT = datetime.timedelta(hours=3)
+GROUP_PROMPT_TTL = 600
+LEGACY_GROUP_ID = 13922
+LEGACY_GROUP_NAME = "БПА24-01"
 
 EXAMS = []
 
-SCHEDULE = {
-  "even": {
-    "monday": [
-      {
-        "time": "13:30-15:00",
-        "subject": "АРХИТЕКТУРА ВЫЧИСЛИТЕЛЬНЫХ СИСТЕМ",
-        "type": "лабораторная",
-        "teacher": "Масаев С. Н.",
-        "room": "корп. \"Гл\" каб. \"409\"",
-        "groups": [
-          "2 подгруппа"
-        ]
-      },
-      {
-        "time": "15:10-16:40",
-        "subject": "МЕТОДЫ МАТЕМАТИЧЕСКОГО МОДЕЛИРОВАНИЯ СЛОЖНЫХ ПРОЦЕССОВ И СИСТЕМ",
-        "type": "лекция",
-        "teacher": "Корчевская О. В.",
-        "room": "корп. \"Цл\" каб. \"213\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "16:50-18:20",
-        "subject": "МЕТОДЫ МАТЕМАТИЧЕСКОГО МОДЕЛИРОВАНИЯ СЛОЖНЫХ ПРОЦЕССОВ И СИСТЕМ",
-        "type": "лабораторная",
-        "teacher": "Корчевская О. В.",
-        "room": "корп. \"Гл\" каб. \"407а\"",
-        "groups": [
-          "2 подгруппа"
-        ]
-      },
-      {
-        "time": "16:50-18:20",
-        "subject": "ТЕХНОЛОГИИ РАЗРАБОТКИ WEB-ПРИЛОЖЕНИЙ",
-        "type": "лабораторная",
-        "teacher": "Демидюк В. Д.",
-        "room": "корп. \"Гл\" каб. \"407\"",
-        "groups": [
-          "1 подгруппа"
-        ]
-      },
-      {
-        "time": "18:30-20:00",
-        "subject": "УПРАВЛЕНИЕ ПРОГРАММНЫМИ ПРОЕКТАМИ",
-        "type": "лекция",
-        "teacher": "Зайцева А. Ю.",
-        "room": "корп. \"Цл\" каб. \"302\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "20:10-21:40",
-        "subject": "УПРАВЛЕНИЕ ПРОГРАММНЫМИ ПРОЕКТАМИ",
-        "type": "лабораторная",
-        "teacher": "Зайцева А. Ю.",
-        "room": "корп. \"Гл\" каб. \"407\"",
-        "groups": [
-          "1 подгруппа"
-        ]
-      }
-    ],
-    "tuesday": [],
-    "wednesday": [
-      {
-        "time": "09:40-11:10",
-        "subject": "ПРОФЕССИОНАЛЬНО-ПРИКЛАДНАЯ ФИЗИЧЕСКАЯ КУЛЬТУРА",
-        "type": "практика",
-        "teacher": "Мунгалов А. Ю.",
-        "room": "корп. \"УСК\" каб. \"Бассейн\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "11:30-13:00",
-        "subject": "ОБЪЕКТНО-ОРИЕНТИРОВАННОЕ ПРОЕКТИРОВАНИЕ",
-        "type": "лекция",
-        "teacher": "Якимов С. П.",
-        "room": "корп. \"Цл\" каб. \"302\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "13:30-15:00",
-        "subject": "УПРАВЛЕНИЕ ПРОГРАММНЫМИ ПРОЕКТАМИ",
-        "type": "лабораторная",
-        "teacher": "Алехина А. Е.",
-        "room": "корп. \"Ал\" каб. \"213\"",
-        "groups": [
-          "2 подгруппа"
-        ]
-      },
-      {
-        "time": "15:10-16:40",
-        "subject": "БАЗЫ ДАННЫХ",
-        "type": "лабораторная",
-        "teacher": "Лопатеева О. Н.",
-        "room": "корп. \"Ал\" каб. \"213\"",
-        "groups": [
-          "2 подгруппа"
-        ]
-      }
-    ],
-    "thursday": [
-      {
-        "time": "11:30-13:00",
-        "subject": "ТЕХНОЛОГИИ РАЗРАБОТКИ WEB-ПРИЛОЖЕНИЙ",
-        "type": "лекция",
-        "teacher": "Яровой С. В.",
-        "room": "корп. \"Цл\" каб. \"213\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "13:30-15:00",
-        "subject": "БАЗЫ ДАННЫХ",
-        "type": "лекция",
-        "teacher": "Лопатеева О. Н.",
-        "room": "корп. \"Вл\" каб. \"1\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "15:10-16:40",
-        "subject": "ОБЪЕКТНО-ОРИЕНТИРОВАННОЕ ПРОЕКТИРОВАНИЕ",
-        "type": "лабораторная",
-        "teacher": "Маркушин Е. М.",
-        "room": "корп. \"Гл\" каб. \"410\"",
-        "groups": [
-          "2 подгруппа"
-        ]
-      },
-      {
-        "time": "15:10-16:40",
-        "subject": "БАЗЫ ДАННЫХ",
-        "type": "лабораторная",
-        "teacher": "Лопатеева О. Н.",
-        "room": "корп. \"Гл\" каб. \"409\"",
-        "groups": [
-          "1 подгруппа"
-        ]
-      },
-      {
-        "time": "16:50-18:20",
-        "subject": "ОБЪЕКТНО-ОРИЕНТИРОВАННОЕ ПРОЕКТИРОВАНИЕ",
-        "type": "лабораторная",
-        "teacher": "Маркушин Е. М.",
-        "room": "корп. \"Гл\" каб. \"410\"",
-        "groups": [
-          "1 подгруппа"
-        ]
-      }
-    ],
-    "friday": [
-      {
-        "time": "09:40-11:10",
-        "subject": "ПРОФЕССИОНАЛЬНО-ПРИКЛАДНАЯ ФИЗИЧЕСКАЯ КУЛЬТУРА",
-        "type": "практика",
-        "teacher": "Мунгалов А. Ю.",
-        "room": "корп. \"УСК\" каб. \"Спортзал\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "11:30-13:00",
-        "subject": "МЕТОДЫ МАТЕМАТИЧЕСКОГО МОДЕЛИРОВАНИЯ СЛОЖНЫХ ПРОЦЕССОВ И СИСТЕМ",
-        "type": "лабораторная",
-        "teacher": "Корчевская О. В.",
-        "room": "корп. \"Гл\" каб. \"409\"",
-        "groups": [
-          "1 подгруппа"
-        ]
-      },
-      {
-        "time": "11:30-13:00",
-        "subject": "ТЕХНОЛОГИИ РАЗРАБОТКИ WEB-ПРИЛОЖЕНИЙ",
-        "type": "лабораторная",
-        "teacher": "Яровой С. В.",
-        "room": "корп. \"Гл\" каб. \"407\"",
-        "groups": [
-          "2 подгруппа"
-        ]
-      },
-      {
-        "time": "13:30-15:00",
-        "subject": "АРХИТЕКТУРА ВЫЧИСЛИТЕЛЬНЫХ СИСТЕМ",
-        "type": "лабораторная",
-        "teacher": "Федченко Д. П.",
-        "room": "корп. \"Цл\" каб. \"203\"",
-        "groups": [
-          "1 подгруппа"
-        ]
-      }
-    ],
-    "saturday": [
-      {
-        "time": "09:40-11:10",
-        "subject": "ПРАВОВЕДЕНИЕ",
-        "type": "лекция",
-        "teacher": "Василенко С. И.",
-        "room": "корп. \"Гл\" каб. \"414\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "11:30-13:00",
-        "subject": "ФИЛОСОФИЯ",
-        "type": "лекция",
-        "teacher": "Медова А. А.",
-        "room": "корп. \"Цл\" каб. \"302\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "13:30-15:00",
-        "subject": "ПРОЕКТНОЕ ОБУЧЕНИЕ",
-        "type": "практика",
-        "teacher": "Яровой С. В.",
-        "room": "корп. \"Гл\" каб. \"410\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "15:10-16:40",
-        "subject": "ПРОЕКТНОЕ ОБУЧЕНИЕ",
-        "type": "практика",
-        "teacher": "Яровой С. В.",
-        "room": "корп. \"Гл\" каб. \"410\"",
-        "groups": [
-          "все"
-        ]
-      }
-    ],
-    "sunday": []
-  },
-  "odd": {
-    "monday": [
-      {
-        "time": "13:30-15:00",
-        "subject": "АРХИТЕКТУРА ВЫЧИСЛИТЕЛЬНЫХ СИСТЕМ",
-        "type": "лабораторная",
-        "teacher": "Масаев С. Н.",
-        "room": "корп. \"Гл\" каб. \"413\"",
-        "groups": [
-          "2 подгруппа"
-        ]
-      },
-      {
-        "time": "15:10-16:40",
-        "subject": "МЕТОДЫ МАТЕМАТИЧЕСКОГО МОДЕЛИРОВАНИЯ СЛОЖНЫХ ПРОЦЕССОВ И СИСТЕМ",
-        "type": "лекция",
-        "teacher": "Корчевская О. В.",
-        "room": "корп. \"Цл\" каб. \"302\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "16:50-18:20",
-        "subject": "ТЕХНОЛОГИИ РАЗРАБОТКИ WEB-ПРИЛОЖЕНИЙ",
-        "type": "лабораторная",
-        "teacher": "Яровой С. В.",
-        "room": "корп. \"Гл\" каб. \"409\"",
-        "groups": [
-          "2 подгруппа"
-        ]
-      },
-      {
-        "time": "16:50-18:20",
-        "subject": "МЕТОДЫ МАТЕМАТИЧЕСКОГО МОДЕЛИРОВАНИЯ СЛОЖНЫХ ПРОЦЕССОВ И СИСТЕМ",
-        "type": "лабораторная",
-        "teacher": "Корчевская О. В.",
-        "room": "корп. \"Гл\" каб. \"410\"",
-        "groups": [
-          "1 подгруппа"
-        ]
-      },
-      {
-        "time": "18:30-20:00",
-        "subject": "УПРАВЛЕНИЕ ПРОГРАММНЫМИ ПРОЕКТАМИ",
-        "type": "лабораторная",
-        "teacher": "Зайцева А. Ю.",
-        "room": "корп. \"Гл\" каб. \"407\"",
-        "groups": [
-          "1 подгруппа"
-        ]
-      }
-    ],
-    "tuesday": [],
-    "wednesday": [
-      {
-        "time": "09:40-11:10",
-        "subject": "ПРОФЕССИОНАЛЬНО-ПРИКЛАДНАЯ ФИЗИЧЕСКАЯ КУЛЬТУРА",
-        "type": "практика",
-        "teacher": "Мунгалов А. Ю.",
-        "room": "корп. \"УСК\" каб. \"Бассейн\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "11:30-13:00",
-        "subject": "БАЗЫ ДАННЫХ",
-        "type": "лекция",
-        "teacher": "Лопатеева О. Н.",
-        "room": "корп. \"Ал\" каб. \"212\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "13:30-15:00",
-        "subject": "ОБЪЕКТНО-ОРИЕНТИРОВАННОЕ ПРОЕКТИРОВАНИЕ",
-        "type": "лекция",
-        "teacher": "Якимов С. П.",
-        "room": "корп. \"Ал\" каб. \"212\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "15:10-16:40",
-        "subject": "ФИЛОСОФИЯ",
-        "type": "практика",
-        "teacher": "Медова А. А.",
-        "room": "корп. \"Цл\" каб. \"304\"",
-        "groups": [
-          "все"
-        ]
-      }
-    ],
-    "thursday": [
-      {
-        "time": "11:30-13:00",
-        "subject": "ПРАВОВЕДЕНИЕ",
-        "type": "практика",
-        "teacher": "Орлов Е. И.",
-        "room": "корп. \"Гл\" каб. \"302\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "13:30-15:00",
-        "subject": "МЕТОДЫ МАТЕМАТИЧЕСКОГО МОДЕЛИРОВАНИЯ СЛОЖНЫХ ПРОЦЕССОВ И СИСТЕМ",
-        "type": "лабораторная",
-        "teacher": "Корчевская О. В.",
-        "room": "корп. \"Гл\" каб. \"410\"",
-        "groups": [
-          "2 подгруппа"
-        ]
-      },
-      {
-        "time": "13:30-15:00",
-        "subject": "БАЗЫ ДАННЫХ",
-        "type": "лабораторная",
-        "teacher": "Лопатеева О. Н.",
-        "room": "корп. \"Гл\" каб. \"409\"",
-        "groups": [
-          "1 подгруппа"
-        ]
-      },
-      {
-        "time": "15:10-16:40",
-        "subject": "ТЕХНОЛОГИИ РАЗРАБОТКИ WEB-ПРИЛОЖЕНИЙ",
-        "type": "лабораторная",
-        "teacher": "Демидюк В. Д.",
-        "room": "корп. \"Гл\" каб. \"410\"",
-        "groups": [
-          "1 подгруппа"
-        ]
-      },
-      {
-        "time": "15:10-16:40",
-        "subject": "БАЗЫ ДАННЫХ",
-        "type": "лабораторная",
-        "teacher": "Лопатеева О. Н.",
-        "room": "корп. \"Гл\" каб. \"409\"",
-        "groups": [
-          "2 подгруппа"
-        ]
-      }
-    ],
-    "friday": [
-      {
-        "time": "09:40-11:10",
-        "subject": "ПРОФЕССИОНАЛЬНО-ПРИКЛАДНАЯ ФИЗИЧЕСКАЯ КУЛЬТУРА",
-        "type": "практика",
-        "teacher": "Мунгалов А. Ю.",
-        "room": "корп. \"УСК\" каб. \"Спортзал\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "11:30-13:00",
-        "subject": "АРХИТЕКТУРА ВЫЧИСЛИТЕЛЬНЫХ СИСТЕМ",
-        "type": "лекция",
-        "teacher": "Масаев С. Н.",
-        "room": "корп. \"Цл\" каб. \"213\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "13:30-15:00",
-        "subject": "ОБЪЕКТНО-ОРИЕНТИРОВАННОЕ ПРОЕКТИРОВАНИЕ",
-        "type": "лабораторная",
-        "teacher": "Маркушин Е. М.",
-        "room": "корп. \"Гл\" каб. \"410\"",
-        "groups": [
-          "1 подгруппа"
-        ]
-      },
-      {
-        "time": "13:30-15:00",
-        "subject": "УПРАВЛЕНИЕ ПРОГРАММНЫМИ ПРОЕКТАМИ",
-        "type": "лабораторная",
-        "teacher": "Алехина А. Е.",
-        "room": "корп. \"Ал\" каб. \"213\"",
-        "groups": [
-          "2 подгруппа"
-        ]
-      },
-      {
-        "time": "15:10-16:40",
-        "subject": "АРХИТЕКТУРА ВЫЧИСЛИТЕЛЬНЫХ СИСТЕМ",
-        "type": "лабораторная",
-        "teacher": "Федченко Д. П.",
-        "room": "корп. \"Гл\" каб. \"409\"",
-        "groups": [
-          "1 подгруппа"
-        ]
-      },
-      {
-        "time": "15:10-16:40",
-        "subject": "ОБЪЕКТНО-ОРИЕНТИРОВАННОЕ ПРОЕКТИРОВАНИЕ",
-        "type": "лабораторная",
-        "teacher": "Маркушин Е. М.",
-        "room": "корп. \"Гл\" каб. \"410\"",
-        "groups": [
-          "2 подгруппа"
-        ]
-      }
-    ],
-    "saturday": [
-      {
-        "time": "11:30-13:00",
-        "subject": "УПРАВЛЕНИЕ ПРОГРАММНЫМИ ПРОЕКТАМИ",
-        "type": "лекция",
-        "teacher": "Зайцева А. Ю.",
-        "room": "корп. \"Вл\" каб. \"2\"",
-        "groups": [
-          "все"
-        ]
-      },
-      {
-        "time": "13:30-15:00",
-        "subject": "ФИЛОСОФИЯ",
-        "type": "лекция",
-        "teacher": "Медова А. А.",
-        "room": "корп. \"Гл\" каб. \"304\"",
-        "groups": [
-          "все"
-        ]
-      }
-    ],
-    "sunday": []
-  }
-}
+PENDING_GROUP = {}
+
+
+def group_link(group_id):
+    if not group_id:
+        return FOOTER_LINK
+    return f'\n\n<a href="https://timetable.pallada.sibsau.ru/timetable/group/{group_id}">Полное расписание на сайте</a>'
+
+
+def dest_key(update):
+    chat_id = update.effective_chat.id
+    thread_id = 0
+    message = update.effective_message
+    if message is not None and getattr(message, "is_topic_message", False):
+        thread_id = message.message_thread_id or 0
+    return chat_id, thread_id
+
 class DatabaseManager:
     def __init__(self):
         self.init_db()
+        self.migrate_legacy_settings()
 
     def init_db(self):
         with sqlite3.connect("schedule_bot.db") as conn:
@@ -546,6 +94,18 @@ class DatabaseManager:
                     sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    chat_id INTEGER NOT NULL,
+                    thread_id INTEGER NOT NULL DEFAULT 0,
+                    group_id INTEGER,
+                    group_name TEXT,
+                    auto_enabled INTEGER DEFAULT 0,
+                    created_by INTEGER,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (chat_id, thread_id)
+                )
+            ''')
 
     def save_message(self, chat_id, user_id, message_id):
         with sqlite3.connect("schedule_bot.db") as conn:
@@ -562,34 +122,67 @@ class DatabaseManager:
             row = cur.fetchone()
             return row[0] if row else None
 
-    def set_auto_chat(self, user_id, chat_id, thread_id=None):
-        with sqlite3.connect("schedule_bot.db") as conn:
+    def set_group(self, chat_id, thread_id, group_id, group_name, user_id=None):
+        with sqlite3.connect(DB_PATH) as conn:
             conn.execute('''
-                INSERT OR REPLACE INTO user_settings (user_id, auto_chat_id, message_thread_id, auto_enabled)
-                VALUES (?, ?, ?, 1)
-            ''', (user_id, chat_id, thread_id))
+                INSERT INTO subscriptions (chat_id, thread_id, group_id, group_name, created_by, updated_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(chat_id, thread_id) DO UPDATE SET
+                    group_id = excluded.group_id,
+                    group_name = excluded.group_name,
+                    created_by = excluded.created_by,
+                    updated_at = CURRENT_TIMESTAMP
+            ''', (chat_id, thread_id, group_id, group_name, user_id))
 
-    def disable_auto(self, user_id):
-        with sqlite3.connect("schedule_bot.db") as conn:
-            conn.execute('UPDATE user_settings SET auto_enabled = 0 WHERE user_id = ?', (user_id,))
-
-    def get_auto_chat(self, user_id):
-        with sqlite3.connect("schedule_bot.db") as conn:
+    def get_subscription(self, chat_id, thread_id):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
             cur = conn.execute(
-                'SELECT auto_chat_id, message_thread_id, auto_enabled FROM user_settings WHERE user_id = ?',
-                (user_id,)
+                'SELECT * FROM subscriptions WHERE chat_id = ? AND thread_id = ?',
+                (chat_id, thread_id)
             )
             row = cur.fetchone()
-            if row:
-                return (row[0], row[1], bool(row[2]))
-            return (None, None, False)
+            return dict(row) if row else None
 
-    def get_all_auto_chats(self):
-        with sqlite3.connect("schedule_bot.db") as conn:
-            cur = conn.execute(
-                'SELECT user_id, auto_chat_id, message_thread_id FROM user_settings WHERE auto_enabled = 1'
+    def set_auto(self, chat_id, thread_id, enabled):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                'UPDATE subscriptions SET auto_enabled = ?, updated_at = CURRENT_TIMESTAMP '
+                'WHERE chat_id = ? AND thread_id = ?',
+                (1 if enabled else 0, chat_id, thread_id)
             )
-            return cur.fetchall()
+
+    def get_auto_subscriptions(self):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute(
+                'SELECT * FROM subscriptions WHERE auto_enabled = 1 AND group_id IS NOT NULL'
+            )
+            return [dict(row) for row in cur.fetchall()]
+
+    def get_subscriptions_by(self, user_id):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute('SELECT * FROM subscriptions WHERE created_by = ?', (user_id,))
+            return [dict(row) for row in cur.fetchall()]
+
+    def migrate_legacy_settings(self):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            if conn.execute('SELECT COUNT(*) FROM subscriptions').fetchone()[0]:
+                return
+            legacy = conn.execute(
+                'SELECT user_id, auto_chat_id, message_thread_id, auto_enabled '
+                'FROM user_settings WHERE auto_chat_id IS NOT NULL'
+            ).fetchall()
+
+        for row in legacy:
+            thread_id = row['message_thread_id'] or 0
+            self.set_group(row['auto_chat_id'], thread_id,
+                           LEGACY_GROUP_ID, LEGACY_GROUP_NAME, row['user_id'])
+            if row['auto_enabled']:
+                self.set_auto(row['auto_chat_id'], thread_id, True)
+            logging.info("Перенесена старая настройка: чат %s, топик %s", row['auto_chat_id'], thread_id)
 
     def set_exam_reminder(self, user_id, chat_id, thread_id, exam_date, exam_time, subject):
         with sqlite3.connect("schedule_bot.db") as conn:
@@ -638,11 +231,6 @@ class DatabaseManager:
                 DELETE FROM sent_reminders WHERE exam_date < ?
             ''', (exam_date,))
 
-def get_week_type(date=None):
-    if date is None:
-        date = datetime.date.today()
-    return "odd" if date.isocalendar()[1] % 2 == 0 else "even"
-
 def get_day_name(date):
     days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
     return days[date.weekday()]
@@ -653,6 +241,29 @@ def get_russian_day(eng):
         "thursday": "Четверг", "friday": "Пятница", "saturday": "Суббота", "sunday": "Воскресенье"
     }
     return mapping.get(eng, eng)
+
+def get_schedule_or_none(group_id):
+    try:
+        return ss.get_schedule(group_id)
+    except ss.ScheduleError as exc:
+        logging.warning("Не удалось получить расписание группы %s: %s", group_id, exc)
+        return None
+
+async def require_group(update, manager):
+    chat_id, thread_id = dest_key(update)
+    sub = manager.get_subscription(chat_id, thread_id)
+    if sub and sub.get("group_id"):
+        return sub
+
+    PENDING_GROUP[(chat_id, thread_id)] = time.time()
+    message = await update.message.reply_text(
+        "Для этого чата группа ещё не задана.\n"
+        "Пришлите название группы, например <code>БПА24-01</code>.\n"
+        "Сменить группу потом можно командой <code>/group</code>.",
+        parse_mode='HTML'
+    )
+    manager.save_message(chat_id, update.effective_user.id, message.message_id)
+    return None
 
 def parse_exam_datetime(exam_date_str, exam_time_str):
     try:
@@ -746,11 +357,17 @@ def with_cleanup(handler):
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "<b>Бот расписания</b>\n\n"
-        "<b>Команды расписания:</b>\n"
+        "<b>Сначала задайте группу:</b>\n"
+        "/group БПА24-01 — задать или сменить группу для этого чата/топика\n"
+        "/status — что сейчас настроено для этого чата\n\n"
+        "<b>Расписание:</b>\n"
         "/today — сегодня\n"
         "/tomorrow — завтра\n"
         "/week — вся неделя\n"
-        "/day &lt;день&gt; — конкретный день (напр. /day вторник)\n"
+        "/day &lt;день&gt; — конкретный день (напр. /day вторник)\n\n"
+        "<b>Автоотправка:</b>\n"
+        "/setchat — публиковать расписание в этот чат после последней пары\n"
+        "/disable_auto — выключить автоотправку\n"
         + FOOTER_LINK
     )
     msg = await update.message.reply_text(text, parse_mode='HTML')
@@ -758,24 +375,33 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @with_cleanup
 async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    manager = DatabaseManager()
+    sub = await require_group(update, manager)
+    if not sub:
+        return
     today = datetime.date.today()
-    msg = await update.message.reply_text(
-        format_schedule(get_day_name(today), get_week_type(today), today),
-        parse_mode='HTML'
-    )
-    DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+    schedule = get_schedule_or_none(sub["group_id"])
+    text = (format_schedule(schedule, sub, today) if schedule
+            else "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
+    msg = await update.message.reply_text(text, parse_mode='HTML')
+    manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 @with_cleanup
 async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    manager = DatabaseManager()
+    sub = await require_group(update, manager)
+    if not sub:
+        return
     tmr = datetime.date.today() + datetime.timedelta(days=1)
-    msg = await update.message.reply_text(
-        format_schedule(get_day_name(tmr), get_week_type(tmr), tmr),
-        parse_mode='HTML'
-    )
-    DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+    schedule = get_schedule_or_none(sub["group_id"])
+    text = (format_schedule(schedule, sub, tmr) if schedule
+            else "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
+    msg = await update.message.reply_text(text, parse_mode='HTML')
+    manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 @with_cleanup
 async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    manager = DatabaseManager()
     mapping = {
         'понедельник': 'monday', 'вторник': 'tuesday', 'среда': 'wednesday',
         'четверг': 'thursday', 'пятница': 'friday', 'суббота': 'saturday', 'воскресенье': 'sunday'
@@ -787,106 +413,180 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Укажите день: /day понедельник" + FOOTER_LINK,
             parse_mode='HTML'
         )
-    else:
-        target = datetime.date.today()
-        while get_day_name(target) != day:
-            target += datetime.timedelta(days=1)
-        msg = await update.message.reply_text(
-            format_schedule(day, get_week_type(target), target),
-            parse_mode='HTML'
-        )
-    DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+        manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+        return
+
+    sub = await require_group(update, manager)
+    if not sub:
+        return
+    target = datetime.date.today()
+    while get_day_name(target) != day:
+        target += datetime.timedelta(days=1)
+    schedule = get_schedule_or_none(sub["group_id"])
+    text = (format_schedule(schedule, sub, target) if schedule
+            else "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
+    msg = await update.message.reply_text(text, parse_mode='HTML')
+    manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 @with_cleanup
 async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    manager = DatabaseManager()
+    sub = await require_group(update, manager)
+    if not sub:
+        return
     today = datetime.date.today()
-    week_type = get_week_type(today)
-    text = "<b>Расписание на неделю</b>\n\n"
-    for eng in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
-        lessons = SCHEDULE[week_type].get(eng, [])
-        ru = get_russian_day(eng)
-        if lessons:
-            time_groups = {}
-            for lesson in lessons:
-                time_groups.setdefault(lesson['time'], []).append(lesson)
-
-            text += f"<b>{ru}</b>:\n"
-            for time_slot in sorted(time_groups.keys(), key=lambda t: t.split('-')[0]):
-                group = time_groups[time_slot]
-                all_groups_lesson = next((l for l in group if l['groups'][0] == "все"), None)
-                if all_groups_lesson:
-                    text += f"{time_slot} | <b>{all_groups_lesson['subject']}</b> ({all_groups_lesson['type']})\n"
-                else:
-                    for lesson in group:
-                        text += f"{time_slot} | {lesson['groups'][0]}: <b>{lesson['subject']}</b> ({lesson['type']})\n"
-            text += "\n"
-        else:
-            text += f"<b>{ru}</b>: Выходной\n\n"
-    
-    text += f"Неделя: {'1-я' if week_type == 'odd' else '2-я'}" + FOOTER_LINK
+    schedule = get_schedule_or_none(sub["group_id"])
+    text = (format_week(schedule, sub, today) if schedule
+            else "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
     msg = await update.message.reply_text(text, parse_mode='HTML')
-    DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+    manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+
+async def apply_group(update, chat_id, thread_id, query):
+    manager = DatabaseManager()
+    user_id = update.effective_user.id
+    try:
+        exact, matches = ss.find_group(query)
+    except ss.ScheduleError as exc:
+        msg = await update.message.reply_text(
+            f"Не удалось проверить группу: {exc}" + FOOTER_LINK, parse_mode='HTML')
+        manager.save_message(chat_id, user_id, msg.message_id)
+        return
+
+    if not exact and matches:
+        PENDING_GROUP[(chat_id, thread_id)] = time.time()
+        lines = "\n".join(f"• <code>{g['name']}</code>" for g in matches)
+        msg = await update.message.reply_text(
+            "Нашлось несколько групп, уточните название:\n\n" + lines, parse_mode='HTML')
+        manager.save_message(chat_id, user_id, msg.message_id)
+        return
+
+    if not exact:
+        PENDING_GROUP[(chat_id, thread_id)] = time.time()
+        msg = await update.message.reply_text(
+            f"Группа «{query}» не найдена. Пришлите название точнее, например <code>БПА24-01</code>.",
+            parse_mode='HTML')
+        manager.save_message(chat_id, user_id, msg.message_id)
+        return
+
+    manager.set_group(chat_id, thread_id, exact["id"], exact["name"], user_id)
+    PENDING_GROUP.pop((chat_id, thread_id), None)
+
+    sub = {"group_id": exact["id"], "group_name": exact["name"]}
+    schedule = get_schedule_or_none(exact["id"])
+    if schedule:
+        text = (f"<b>Группа сохранена: {exact['name']}</b>\n"
+                f"Автоотправка после пар: <code>/setchat</code>\n\n"
+                + format_schedule(schedule, sub, datetime.date.today()))
+    else:
+        text = (f"<b>Группа сохранена: {exact['name']}</b>\n\n"
+                "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
+    msg = await update.message.reply_text(text, parse_mode='HTML')
+    manager.save_message(chat_id, user_id, msg.message_id)
+
+
+@with_cleanup
+async def group_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id, thread_id = dest_key(update)
+    query = " ".join(context.args).strip()
+    if not query:
+        PENDING_GROUP[(chat_id, thread_id)] = time.time()
+        msg = await update.message.reply_text(
+            "Пришлите название группы, например <code>БПА24-01</code>.", parse_mode='HTML')
+        DatabaseManager().save_message(chat_id, update.effective_user.id, msg.message_id)
+        return
+    await apply_group(update, chat_id, thread_id, query)
+
+
+async def group_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id, thread_id = dest_key(update)
+    asked_at = PENDING_GROUP.get((chat_id, thread_id))
+    if not asked_at or (time.time() - asked_at) > GROUP_PROMPT_TTL:
+        PENDING_GROUP.pop((chat_id, thread_id), None)
+        return
+    if update.effective_chat.type != "private":
+        reply = update.message.reply_to_message
+        if not reply or not reply.from_user or reply.from_user.id != context.bot.id:
+            return
+    text = (update.message.text or "").strip()
+    if text:
+        await apply_group(update, chat_id, thread_id, text)
+
+
+@with_cleanup
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    manager = DatabaseManager()
+    chat_id, thread_id = dest_key(update)
+    sub = manager.get_subscription(chat_id, thread_id)
+    if not sub or not sub.get("group_id"):
+        text = ("Для этого чата группа не задана.\n"
+                "Задайте её командой <code>/group БПА24-01</code>." + FOOTER_LINK)
+    else:
+        auto = "включена" if sub.get("auto_enabled") else "выключена"
+        text = (f"<b>Настройки этого чата</b>\n\n"
+                f"Группа: <code>{sub['group_name']}</code>\n"
+                f"Автоотправка: {auto}\n")
+        if sub.get("auto_enabled"):
+            text += "Отправка: после последней пары → расписание на завтра"
+        else:
+            text += "Включить: <code>/setchat</code>"
+        text += group_link(sub.get("group_id"))
+    msg = await update.message.reply_text(text, parse_mode='HTML')
+    manager.save_message(chat_id, update.effective_user.id, msg.message_id)
+
 
 @with_cleanup
 async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     manager = DatabaseManager()
-    target_chat_id = None
-    target_thread_id = None
+    sender_id = update.effective_user.id
 
-    if update.effective_chat.type == "private":
-        if context.args:
-            if len(context.args) >= 1 and context.args[0].lstrip('-').isdigit():
-                target_chat_id = int(context.args[0])
-            if len(context.args) >= 2 and context.args[1].isdigit():
-                target_thread_id = int(context.args[1])
-        if not target_chat_id:
-            target_chat_id = update.effective_chat.id
+    if context.args:
+        if not context.args[0].lstrip('-').isdigit():
+            msg = await update.message.reply_text(
+                "Укажите chat_id числом: <code>/setchat -1001234567890 [thread_id]</code>" + FOOTER_LINK,
+                parse_mode='HTML')
+            manager.save_message(update.effective_chat.id, sender_id, msg.message_id)
+            return
+        target_chat = int(context.args[0])
+        target_thread = int(context.args[1]) if len(context.args) > 1 and context.args[1].isdigit() else 0
     else:
-        if not context.args:
-            target_chat_id = update.effective_chat.id
-            if update.message.is_topic_message:
-                target_thread_id = update.message.message_thread_id
-        else:
-            if context.args[0].lstrip('-').isdigit():
-                target_chat_id = int(context.args[0])
-            if len(context.args) >= 2 and context.args[1].isdigit():
-                target_thread_id = int(context.args[1])
+        target_chat, target_thread = dest_key(update)
 
-    if not target_chat_id:
+    sub = manager.get_subscription(target_chat, target_thread)
+    if not sub or not sub.get("group_id"):
+        if (target_chat, target_thread) == dest_key(update):
+            PENDING_GROUP[(target_chat, target_thread)] = time.time()
+            hint = "Сначала пришлите название группы, например <code>БПА24-01</code>."
+        else:
+            hint = ("Для этого чата группа не задана. Задайте её там командой "
+                    "<code>/group БПА24-01</code> и повторите /setchat.")
         msg = await update.message.reply_text(
-            "<b>Настройка автоотправки:</b>\n\n"
-            "В ЛС: просто <code>/setchat</code>\n"
-            "В группе: <code>/setchat &lt;chat_id&gt;</code>\n"
-            "В топик: <code>/setchat &lt;chat_id&gt; &lt;thread_id&gt;</code>\n\n"
-            "ID чата можно узнать через @getidsbot\n"
-            "Thread ID — это ID топика в группе" + FOOTER_LINK,
-            parse_mode='HTML'
-        )
-        manager.save_message(update.effective_chat.id, user_id, msg.message_id)
+            "<b>Автоотправка не включена</b>\n\n" + hint + FOOTER_LINK, parse_mode='HTML')
+        manager.save_message(update.effective_chat.id, sender_id, msg.message_id)
         return
 
-    manager.set_auto_chat(user_id, target_chat_id, target_thread_id)
-    thread_info = f"\nТопик: <code>{target_thread_id}</code>" if target_thread_id else "\nЧат (без топика)"
+    manager.set_auto(target_chat, target_thread, True)
+    thread_info = f"\nТопик: <code>{target_thread}</code>" if target_thread else ""
     msg = await update.message.reply_text(
-        f"<b>Автоотправка настроена!</b>\n\n"
-        f"Чат: <code>{target_chat_id}</code>"
-        f"{thread_info}\n"
-        f"Отправка: сразу после последней пары по Красноярску (UTC+7)\n"
-        f"Отключить: <code>/disable_auto</code>" + FOOTER_LINK,
-        parse_mode='HTML'
-    )
-    manager.save_message(update.effective_chat.id, user_id, msg.message_id)
+        f"<b>Автоотправка включена</b>\n\n"
+        f"Чат: <code>{target_chat}</code>{thread_info}\n"
+        f"Группа: <code>{sub['group_name']}</code>\n"
+        f"Отправка: после последней пары по Красноярску → расписание на завтра\n"
+        f"Выключить: <code>/disable_auto</code>" + group_link(sub.get("group_id")),
+        parse_mode='HTML')
+    manager.save_message(update.effective_chat.id, sender_id, msg.message_id)
 
 @with_cleanup
 async def disable_auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    DatabaseManager().disable_auto(user_id)
-    msg = await update.message.reply_text(
-        "Автоотправка отключена." + FOOTER_LINK,
-        parse_mode='HTML'
-    )
-    DatabaseManager().save_message(update.effective_chat.id, user_id, msg.message_id)
+    manager = DatabaseManager()
+    chat_id, thread_id = dest_key(update)
+    sub = manager.get_subscription(chat_id, thread_id)
+    if not sub:
+        text = "Для этого чата ничего не настроено." + FOOTER_LINK
+    else:
+        manager.set_auto(chat_id, thread_id, False)
+        text = "Автоотправка выключена." + FOOTER_LINK
+    msg = await update.message.reply_text(text, parse_mode='HTML')
+    manager.save_message(chat_id, update.effective_user.id, msg.message_id)
 
 @with_cleanup
 async def sendtext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -904,49 +604,37 @@ async def sendtext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text_to_send = " ".join(context.args)
-    
-    auto_chat_id, message_thread_id, auto_enabled = manager.get_auto_chat(user_id)
-    
-    if not auto_chat_id:
+    subs = manager.get_subscriptions_by(user_id)
+    if not subs:
         msg = await update.message.reply_text(
             "<b>Ошибка</b>\n\n"
-            "Вы не настроили чат для рассылки.\n"
-            "Используйте /setchat, чтобы указать чат и топик." + FOOTER_LINK,
+            "Вы ещё не настроили ни одного чата.\n"
+            "Задайте группу командой <code>/group</code>." + FOOTER_LINK,
             parse_mode='HTML'
         )
         manager.save_message(update.effective_chat.id, user_id, msg.message_id)
         return
 
-    try:
-        if message_thread_id:
-            await context.bot.send_message(
-                chat_id=auto_chat_id,
-                text=text_to_send,
-                message_thread_id=message_thread_id
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=auto_chat_id,
-                text=text_to_send
-            )
-        
-        thread_info = f"\nТопик: <code>{message_thread_id}</code>" if message_thread_id else "\nЧат (без топика)"
-        msg = await update.message.reply_text(
-            f"<b>Сообщение успешно отправлено!</b>\n\n"
-            f"Чат: <code>{auto_chat_id}</code>"
-            f"{thread_info}\n\n"
-            f"Текст:\n{text_to_send}" + FOOTER_LINK,
-            parse_mode='HTML'
-        )
-    except Exception as e:
-        msg = await update.message.reply_text(
-            f"<b>Ошибка отправки</b>\n\n"
-            f"Не удалось отправить сообщение.\n"
-            f"Проверьте, добавлен ли бот в чат <code>{auto_chat_id}</code> и есть ли у него права.\n\n"
-            f"Ошибка: {e}" + FOOTER_LINK,
-            parse_mode='HTML'
-        )
+    sent = 0
+    failed = 0
+    for sub in subs:
+        try:
+            kwargs = {"chat_id": sub["chat_id"], "text": text_to_send}
+            if sub.get("thread_id"):
+                kwargs["message_thread_id"] = sub["thread_id"]
+            await context.bot.send_message(**kwargs)
+            sent += 1
+        except Exception as e:
+            logging.warning("sendtext: не удалось отправить в чат %s: %s", sub["chat_id"], e)
+            failed += 1
+        await asyncio.sleep(1)
 
+    msg = await update.message.reply_text(
+        f"<b>Отправлено</b>\n\n"
+        f"Доставлено: {sent}\n"
+        f"Ошибок: {failed}" + FOOTER_LINK,
+        parse_mode='HTML'
+    )
     manager.save_message(update.effective_chat.id, user_id, msg.message_id)
 
 @with_cleanup
@@ -1219,118 +907,87 @@ async def exam_reminder_loop(application: Application):
             logging.error(f"Ошибка в цикле напоминаний об экзаменах: {e}")
             await asyncio.sleep(60)
 
-async def send_tomorrow_schedule(bot, chat_id, thread_id, week_type_tomorrow):
-    tomorrow = datetime.date.today() + datetime.timedelta(days=1)
-    day_name = get_day_name(tomorrow)
-    schedule_text = format_schedule(day_name, week_type_tomorrow, tomorrow)
+async def send_schedule_to(bot, sub, schedule, date):
+    text = format_schedule(schedule, sub, date)
+    kwargs = {"chat_id": sub["chat_id"], "text": text, "parse_mode": "HTML"}
+    if sub.get("thread_id"):
+        kwargs["message_thread_id"] = sub["thread_id"]
+    await bot.send_message(**kwargs)
 
-    if thread_id:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=schedule_text,
-            parse_mode='HTML',
-            message_thread_id=thread_id
-        )
-    else:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=schedule_text,
-            parse_mode='HTML'
-        )
-
-def get_last_lesson_end_time(day_name, week_type):
-    lessons = SCHEDULE[week_type].get(day_name, [])
+def compute_publish_time(schedule, today, now):
+    lessons = ss.lessons_for(schedule, today)
     if not lessons:
+        for i in range(1, 8):
+            prev = today - datetime.timedelta(days=i)
+            prev_lessons = ss.lessons_for(schedule, prev)
+            if prev_lessons:
+                lessons = prev_lessons
+                break
+
+    end = ss.last_lesson_end_time(lessons)
+    if not end:
         return None
 
-    end_times = []
-    for lesson in lessons:
-        try:
-            end = lesson['time'].split('-')[1]
-            h, m = map(int, end.split(':'))
-            end_times.append((h, m))
-        except (IndexError, ValueError):
-            continue
-
-    return max(end_times) if end_times else None
-
-def find_last_day_with_classes(reference_date):
-    for i in range(1, 8):
-        check_date = reference_date - datetime.timedelta(days=i)
-        day_name = get_day_name(check_date)
-        week_type = get_week_type(check_date)
-        lessons = SCHEDULE[week_type].get(day_name, [])
-        if lessons:
-            return (check_date, day_name, week_type)
-    return None
-
-def get_trigger_time_for_today(today_date):
-    now_krasnoyarsk = datetime.datetime.now(KRASNOYARSK_TZ)
-    today_day_name = get_day_name(today_date)
-    today_week_type = get_week_type(today_date)
-    today_lessons = SCHEDULE[today_week_type].get(today_day_name, [])
-
-    if today_lessons:
-        last_time = get_last_lesson_end_time(today_day_name, today_week_type)
-        if last_time:
-            h, m = last_time
-            return now_krasnoyarsk.replace(hour=h, minute=m, second=0, microsecond=0) + datetime.timedelta(minutes=2)
-    else:
-        result = find_last_day_with_classes(today_date)
-        if result:
-            _, day_name, week_type = result
-            last_time = get_last_lesson_end_time(day_name, week_type)
-            if last_time:
-                h, m = last_time
-                return now_krasnoyarsk.replace(hour=h, minute=m, second=0, microsecond=0) + datetime.timedelta(minutes=2)
-
-    return None
+    hour, minute = end
+    trigger = (KRASNOYARSK_TZ.localize(datetime.datetime.combine(today, datetime.time(hour, minute)))
+               + datetime.timedelta(minutes=PUBLISH_DELAY_MINUTES))
+    if now >= trigger:
+        if now - trigger > STALE_PUBLISH_LIMIT:
+            return None
+        return now
+    return trigger
 
 async def schedule_auto_send(app: Application):
-    now_krasnoyarsk = datetime.datetime.now(KRASNOYARSK_TZ)
-    today = now_krasnoyarsk.date()
+    now = datetime.datetime.now(KRASNOYARSK_TZ)
+    today = now.date()
     tomorrow = today + datetime.timedelta(days=1)
-    tomorrow_week = get_week_type(tomorrow)
-
-    trigger_time = get_trigger_time_for_today(today)
-
-    if not trigger_time:
-        logging.info(f"Не удалось определить время триггера для {today.strftime('%d.%m.%Y')}, пропускаем")
+    manager = DatabaseManager()
+    subs = manager.get_auto_subscriptions()
+    if not subs:
+        logging.info("Автоотправка: нет активных подписок")
         return
 
-    if now_krasnoyarsk < trigger_time:
-        seconds_to_wait = (trigger_time - now_krasnoyarsk).total_seconds()
-        logging.info(f"Автоотправка запланирована через {seconds_to_wait/60:.1f} мин (в {trigger_time.strftime('%H:%M')})")
-        await asyncio.sleep(seconds_to_wait)
+    jobs = []
+    for sub in subs:
+        schedule = get_schedule_or_none(sub["group_id"])
+        if not schedule:
+            continue
+        trigger = compute_publish_time(schedule, today, now)
+        if not trigger:
+            logging.info("Автоотправка: чат %s пропущен, время уже прошло", sub["chat_id"])
+            continue
+        jobs.append((trigger, sub, schedule))
+    jobs.sort(key=lambda job: job[0])
+
+    sent_count = 0
+    for trigger, sub, schedule in jobs:
+        current = datetime.datetime.now(KRASNOYARSK_TZ)
+        if current < trigger:
+            wait = (trigger - current).total_seconds()
+            logging.info("Автоотправка: чат %s — через %.1f мин (в %s)",
+                         sub["chat_id"], wait / 60, trigger.strftime("%H:%M"))
+            await asyncio.sleep(wait)
 
         if datetime.datetime.now(KRASNOYARSK_TZ).date() != today:
-            logging.warning("Дата изменилась во время ожидания, пропускаем отправку")
+            logging.warning("Автоотправка: дата сменилась, прерываем")
             return
-        elif now_krasnoyarsk - trigger_time > datetime.timedelta(hours=3):
-            logging.info(f"Время отправки ({trigger_time.strftime('%H:%M')}) прошло более 3 часов назад, пропускаем")
-            return
-        else:
-            logging.info(f"Время отправки ({trigger_time.strftime('%H:%M')}) уже наступило, отправляем сейчас")
 
-    manager = DatabaseManager()
-    sent_count = 0
-
-    for user_id, target_chat_id, target_thread_id in manager.get_all_auto_chats():
         try:
-            await send_tomorrow_schedule(app.bot, target_chat_id, target_thread_id, tomorrow_week)
-            thread_info = f" (топик {target_thread_id})" if target_thread_id else ""
-            logging.info(f"Отправлено пользователю {user_id} в чат {target_chat_id}{thread_info}")
+            await send_schedule_to(app.bot, sub, schedule, tomorrow)
+            thread_info = " (топик %s)" % sub["thread_id"] if sub.get("thread_id") else ""
+            logging.info("Автоотправка: отправлено в чат %s%s", sub["chat_id"], thread_info)
             sent_count += 1
         except Forbidden:
-            logging.warning(f"Бот заблокирован в чате {target_chat_id}, отключаем автоотправку для {user_id}")
-            manager.disable_auto(user_id)
+            logging.warning("Автоотправка: бот заблокирован в чате %s, выключаем", sub["chat_id"])
+            manager.set_auto(sub["chat_id"], sub["thread_id"], False)
         except BadRequest as e:
-            logging.warning(f"Ошибка отправки в чат {target_chat_id}: {e}")
+            logging.warning("Автоотправка: ошибка отправки в чат %s: %s", sub["chat_id"], e)
         except Exception as e:
-            logging.error(f"Неожиданная ошибка: {type(e).__name__}: {e}")
+            logging.error("Автоотправка: неожиданная ошибка %s: %s", type(e).__name__, e)
+        await asyncio.sleep(1)
 
-    if sent_count > 0:
-        logging.info(f"Всего отправлено: {sent_count}")
+    if sent_count:
+        logging.info("Автоотправка: всего отправлено %d", sent_count)
 
 async def auto_send_loop(application: Application):
     while True:
@@ -1355,47 +1012,75 @@ async def post_init(application: Application):
     asyncio.create_task(exam_reminder_loop(application))
     logging.info("Циклы автоотправки запущены")
 
-def format_schedule(day_name, week_type, date):
-    lessons = SCHEDULE[week_type].get(day_name, [])
+def lesson_block(lesson):
+    room = lesson["room"].replace('"', "'")
+    return (f"<b>{lesson['subject']}</b> ({lesson['type']})\n"
+            f"{lesson['teacher']}\n"
+            f"{room}\n\n")
+
+
+def format_schedule(schedule, sub, date):
+    weekday = get_day_name(date)
+    week_no = ss.week_number_for(date, schedule)
+    lessons = ss.lessons_for(schedule, date)
+    footer = group_link(sub.get("group_id"))
+
+    header = (f"Расписание на {get_russian_day(weekday)} ({date.strftime('%d.%m.%Y')})\n"
+              f"Группа: {sub['group_name']}\n"
+              f"Неделя: {week_no}-я\n")
     if not lessons:
-        return f"Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n\nВыходной! Пар нет." + FOOTER_LINK
+        return header + "\nВыходной! Пар нет." + footer
 
     time_groups = {}
     for lesson in lessons:
-        time_groups.setdefault(lesson['time'], []).append(lesson)
+        time_groups.setdefault(lesson["time"], []).append(lesson)
 
-    sorted_times = sorted(time_groups.keys(), key=lambda t: t.split('-')[0])
-
-    msg = f"Расписание на {get_russian_day(day_name)} ({date.strftime('%d.%m.%Y')})\n"
-    msg += f"Неделя: {'1-я' if week_type == 'odd' else '2-я'}\n\n"
-
-    for time_slot in sorted_times:
+    msg = header + "\n"
+    for time_slot in sorted(time_groups.keys(), key=lambda t: t.split("-")[0]):
         group = time_groups[time_slot]
-        all_groups_lesson = None
-        for lesson in group:
-            if lesson['groups'][0] == "все":
-                all_groups_lesson = lesson
-                break
-
+        common = next((l for l in group if l["subgroup"] == "все"), None)
         msg += f"{time_slot}\n"
-
-        if all_groups_lesson:
-            room_formatted = all_groups_lesson['room'].replace('"', "'")
-            msg += f"<b>{all_groups_lesson['subject']}</b> ({all_groups_lesson['type']})\n"
-            msg += f"{all_groups_lesson['teacher']}\n"
-            msg += f"{room_formatted}\n\n"
+        if common:
+            msg += lesson_block(common)
         else:
             for i, lesson in enumerate(group):
                 if i > 0:
                     msg += "\n"
-                room_formatted = lesson['room'].replace('"', "'")
-                msg += f"{lesson['groups'][0]}:\n"
-                msg += f"<b>{lesson['subject']}</b> ({lesson['type']})\n"
-                msg += f"{lesson['teacher']}\n"
-                msg += f"{room_formatted}\n"
+                msg += f"{lesson['subgroup']}:\n"
+                msg += lesson_block(lesson)
             msg += "\n"
 
-    return msg.strip() + FOOTER_LINK
+    return msg.strip() + footer
+
+
+def format_week(schedule, sub, today):
+    monday = today - datetime.timedelta(days=today.weekday())
+    text = f"<b>Расписание на неделю</b>\nГруппа: {sub['group_name']}\n\n"
+    for i in range(7):
+        current = monday + datetime.timedelta(days=i)
+        lessons = ss.lessons_for(schedule, current)
+        day_ru = get_russian_day(get_day_name(current))
+        if not lessons:
+            text += f"<b>{day_ru}</b>: Выходной\n\n"
+            continue
+
+        time_groups = {}
+        for lesson in lessons:
+            time_groups.setdefault(lesson["time"], []).append(lesson)
+
+        text += f"<b>{day_ru}</b> ({current.strftime('%d.%m')}):\n"
+        for time_slot in sorted(time_groups.keys(), key=lambda t: t.split("-")[0]):
+            group = time_groups[time_slot]
+            common = next((l for l in group if l["subgroup"] == "все"), None)
+            if common:
+                text += f"{time_slot} | <b>{common['subject']}</b> ({common['type']})\n"
+            else:
+                for lesson in group:
+                    text += f"{time_slot} | {lesson['subgroup']}: <b>{lesson['subject']}</b> ({lesson['type']})\n"
+        text += "\n"
+
+    text += f"Неделя: {ss.week_number_for(today, schedule)}-я"
+    return text + group_link(sub.get("group_id"))
 
 def main():
     logging.basicConfig(
@@ -1407,6 +1092,8 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("group", group_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("tomorrow", tomorrow_cmd))
     app.add_handler(CommandHandler("day", day_cmd))
@@ -1420,6 +1107,8 @@ def main():
     app.add_handler(CommandHandler("exams", exams_cmd))
     app.add_handler(CommandHandler("nearexam", nearexam_cmd))
     app.add_handler(CommandHandler("setexam", setexam_cmd))
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_text_handler))
 
     print("Бот запущен!")
     app.run_polling()
