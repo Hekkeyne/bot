@@ -217,6 +217,41 @@ def _parse_lesson(ul):
     }
 
 
+def _parse_session(tab):
+    exams = []
+    for day_div in tab.find_all("div", class_="day"):
+        header = day_div.find("div", class_="header")
+        header_text = _clean(header.get_text(" ")) if header else ""
+        date_match = re.search(r"\d{2}\.\d{2}\.\d{4}", header_text)
+        if not date_match:
+            continue
+        date_value = date_match.group(0)
+
+        body = day_div.find("div", class_="body")
+        if not body:
+            continue
+
+        for line in body.find_all("div", class_="line", recursive=False):
+            time_div = line.find("div", class_="time")
+            time_text = _clean(time_div.get_text(" ")) if time_div else ""
+            time_match = re.search(r"\d{1,2}:\d{2}", time_text)
+            time_value = time_match.group(0) if time_match else ""
+
+            for ul in line.find_all("ul", class_="list-unstyled"):
+                lesson = _parse_lesson(ul)
+                if not lesson["subject"]:
+                    continue
+                exams.append({
+                    "date": date_value,
+                    "time": time_value,
+                    "subject": lesson["subject"],
+                    "type": lesson["type"],
+                    "teacher": lesson["teacher"],
+                    "room": lesson["room"],
+                })
+    return exams
+
+
 def parse_group_html(html):
     soup = BeautifulSoup(html, "lxml")
 
@@ -278,6 +313,9 @@ def parse_group_html(html):
 
         weeks[week_no] = week_days
 
+    session_tab = soup.find("div", id="session_tab")
+    exams = _parse_session(session_tab) if session_tab is not None else []
+
     return {
         "group_id": group_id,
         "group_name": group_name,
@@ -285,6 +323,7 @@ def parse_group_html(html):
         "ref_date": ref_date.isoformat() if ref_date else None,
         "ref_week": ref_week,
         "weeks": weeks,
+        "exams": exams,
     }
 
 

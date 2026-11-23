@@ -17,7 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "diag-6 autosends"
+BUILD = "diag-7 exams"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
@@ -357,70 +357,71 @@ def parse_exam_datetime(exam_date_str, exam_time_str):
     except ValueError:
         return None
 
-def format_exam(exam):
-    room_formatted = exam['room'].replace('"', "'")
-    text = f"<b>{exam['subject']}</b>\n"
-    text += f"{exam['date']} в {exam['time']}\n"
-    text += f"{exam['teacher']}\n"
-    text += f"{room_formatted}"
-    return text
+def exam_datetime(exam):
+    moment = parse_exam_datetime(exam.get("date", ""), exam.get("time") or "00:00")
+    if moment is None:
+        return None
+    return KRASNOYARSK_TZ.localize(moment)
 
-def format_exams_list():
-    if not EXAMS:
-        return "<b>Список экзаменов</b>\n\nЭкзаменов пока нет." + FOOTER_LINK
+def days_left_text(date):
+    delta = (date - datetime.date.today()).days
+    if delta < 0:
+        return "уже прошёл"
+    if delta == 0:
+        return "сегодня"
+    if delta == 1:
+        return "завтра"
+    return "через %d дн." % delta
 
-    text = "<b>Список экзаменов</b>\n\n"
-    sorted_exams = sorted(EXAMS, key=lambda x: parse_exam_datetime(x['date'], x['time']) or datetime.datetime.max)
+def format_exams_list(schedule, sub):
+    exams = schedule.get("exams") or []
+    text = f"<b>Сессия: {esc(sub['group_name'])}</b>\n\n"
+    if not exams:
+        return text + "Экзамены пока не опубликованы." + group_link(sub.get("group_id"))
 
-    for idx, exam in enumerate(sorted_exams, 1):
-        text += f"{idx}. {format_exam(exam)}\n\n"
+    fallback = datetime.datetime.max.replace(tzinfo=KRASNOYARSK_TZ)
+    for exam in sorted(exams, key=lambda item: exam_datetime(item) or fallback):
+        try:
+            date = datetime.datetime.strptime(exam["date"], "%d.%m.%Y").date()
+            left = days_left_text(date)
+        except ValueError:
+            left = ""
+        text += (f"<b>{esc(exam['subject'])}</b> ({esc(exam['type'])})\n"
+                 f"{esc(exam['date'])} в {esc(exam['time'])}, {left}\n"
+                 f"{esc(exam['teacher'])}\n"
+                 f"{esc(exam['room'])}\n\n")
+    return text.strip() + group_link(sub.get("group_id"))
 
-    text += FOOTER_LINK
-    return text
-
-def get_nearest_exam():
+def format_nearest_exam(schedule, sub):
     now = datetime.datetime.now(KRASNOYARSK_TZ)
-    nearest = None
-    nearest_dt = None
+    upcoming = []
+    for exam in schedule.get("exams") or []:
+        moment = exam_datetime(exam)
+        if moment and moment > now:
+            upcoming.append((moment, exam))
 
-    for exam in EXAMS:
-        exam_dt = parse_exam_datetime(exam['date'], exam['time'])
-        if exam_dt:
-            exam_dt = KRASNOYARSK_TZ.localize(exam_dt) if exam_dt.tzinfo is None else exam_dt
+    text = f"<b>Ближайший экзамен: {esc(sub['group_name'])}</b>\n\n"
+    if not upcoming:
+        return text + "Экзаменов впереди нет." + group_link(sub.get("group_id"))
 
-            if exam_dt > now:
-                if nearest_dt is None or exam_dt < nearest_dt:
-                    nearest_dt = exam_dt
-                    nearest = exam
-
-    return nearest, nearest_dt
-
-def format_nearest_exam():
-    nearest, nearest_dt = get_nearest_exam()
-
-    if not nearest:
-        return "<b>Ближайший экзамен</b>\n\nЭкзаменов нет или все экзамены уже прошли." + FOOTER_LINK
-
-    now = datetime.datetime.now(KRASNOYARSK_TZ)
-    time_until = nearest_dt - now
-
-    days = time_until.days
-    hours = time_until.seconds // 3600
-    minutes = (time_until.seconds % 3600) // 60
-
+    moment, exam = min(upcoming, key=lambda item: item[0])
+    delta = moment - now
+    days = delta.days
+    hours = delta.seconds // 3600
+    minutes = (delta.seconds % 3600) // 60
     if days > 0:
-        time_info = f"через {days} дн. {hours} ч."
+        left = f"через {days} дн. {hours} ч."
     elif hours > 0:
-        time_info = f"через {hours} ч. {minutes} мин."
+        left = f"через {hours} ч. {minutes} мин."
     else:
-        time_info = f"через {minutes} мин."
+        left = f"через {minutes} мин."
 
-    text = f"<b>Ближайший экзамен</b>\n\n"
-    text += f"{time_info}\n\n"
-    text += format_exam(nearest)
-    text += FOOTER_LINK
-
-    return text
+    text += (f"{left}\n\n"
+             f"<b>{esc(exam['subject'])}</b> ({esc(exam['type'])})\n"
+             f"{esc(exam['date'])} в {esc(exam['time'])}\n"
+             f"{esc(exam['teacher'])}\n"
+             f"{esc(exam['room'])}")
+    return text + group_link(sub.get("group_id"))
 
 async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manager = DatabaseManager()
@@ -464,6 +465,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/day &lt;день&gt; — конкретный день\n"
         "Группу можно указать сразу, без сохранения:\n"
         "/tomorrow БПА24-02, /week БПА24-02, /day вторник БПА24-02\n\n"
+        "<b>Сессия:</b>\n"
+        "/exams — все экзамены группы\n"
+        "/nearexam — ближайший экзамен\n\n"
         "<b>Автоотправка:</b>\n"
         "/setchat — публиковать расписание в этот чат после последней пары\n"
         "/autosends — список всех автоотправок с номерами\n"
@@ -813,94 +817,43 @@ async def now_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @with_cleanup
 async def exams_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text(
-        format_exams_list(),
-        parse_mode='HTML'
-    )
-    DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+    manager = DatabaseManager()
+    chosen = await group_by_query(update, " ".join(context.args))
+    if chosen is False:
+        return
+    sub = chosen or await require_group(update, manager)
+    if not sub:
+        return
+    schedule = get_schedule_or_none(sub["group_id"])
+    text = (format_exams_list(schedule, sub) if schedule
+            else "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
+    msg = await update.message.reply_text(text, parse_mode='HTML')
+    manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 @with_cleanup
 async def nearexam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text(
-        format_nearest_exam(),
-        parse_mode='HTML'
-    )
-    DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+    manager = DatabaseManager()
+    chosen = await group_by_query(update, " ".join(context.args))
+    if chosen is False:
+        return
+    sub = chosen or await require_group(update, manager)
+    if not sub:
+        return
+    schedule = get_schedule_or_none(sub["group_id"])
+    text = (format_nearest_exam(schedule, sub) if schedule
+            else "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
+    msg = await update.message.reply_text(text, parse_mode='HTML')
+    manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 @with_cleanup
 async def setexam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    manager = DatabaseManager()
-    target_chat_id = None
-    target_thread_id = None
-
-    if not EXAMS:
-        msg = await update.message.reply_text(
-            "<b>Ошибка</b>\n\nЭкзамены не заполнены. Обратитесь к администратору." + FOOTER_LINK,
-            parse_mode='HTML'
-        )
-        manager.save_message(update.effective_chat.id, user_id, msg.message_id)
-        return
-
-    if update.effective_chat.type == "private":
-        if context.args:
-            if len(context.args) >= 1 and context.args[0].lstrip('-').isdigit():
-                target_chat_id = int(context.args[0])
-            if len(context.args) >= 2 and context.args[1].isdigit():
-                target_thread_id = int(context.args[1])
-        if not target_chat_id:
-            target_chat_id = update.effective_chat.id
-    else:
-        if not context.args:
-            target_chat_id = update.effective_chat.id
-            if update.message.is_topic_message:
-                target_thread_id = update.message.message_thread_id
-        else:
-            if context.args[0].lstrip('-').isdigit():
-                target_chat_id = int(context.args[0])
-            if len(context.args) >= 2 and context.args[1].isdigit():
-                target_thread_id = int(context.args[1])
-
-    if not target_chat_id:
-        msg = await update.message.reply_text(
-            "<b>Настройка напоминаний об экзаменах:</b>\n\n"
-            "В ЛС: просто <code>/setexam</code>\n"
-            "В группе: <code>/setexam &lt;chat_id&gt;</code>\n"
-            "В топик: <code>/setexam &lt;chat_id&gt; &lt;thread_id&gt;</code>\n\n"
-            "Бот будет отправлять:\n"
-            "• За 3 дня до экзамена\n"
-            "• За 1 день до экзамена\n"
-            "• За 1 час до экзамена\n"
-            "• Через 6 часов после начала (если есть следующий экзамен)" + FOOTER_LINK,
-            parse_mode='HTML'
-        )
-        manager.save_message(update.effective_chat.id, user_id, msg.message_id)
-        return
-
-    reminders_set = 0
-    for exam in EXAMS:
-        manager.set_exam_reminder(
-            user_id, target_chat_id, target_thread_id,
-            exam['date'], exam['time'], exam['subject']
-        )
-        reminders_set += 1
-
-    thread_info = f"\nТопик: <code>{target_thread_id}</code>" if target_thread_id else "\nЧат (без топика)"
     msg = await update.message.reply_text(
-        f"<b>Напоминания об экзаменах включены!</b>\n\n"
-        f"Чат: <code>{target_chat_id}</code>"
-        f"{thread_info}\n"
-        f"Настроено напоминаний: {reminders_set}\n\n"
-        f"Бот будет напоминать:\n"
-        f"• За 3 дня до экзамена\n"
-        f"• За 1 день до экзамена\n"
-        f"• За 1 час до экзамена\n"
-        f"• Через 6 часов после начала\n\n"
-        f"Используйте /exams для просмотра всех экзаменов\n"
-        f"Используйте /nearexam для просмотра ближайшего экзамена" + FOOTER_LINK,
+        "Напоминания об экзаменах пока не включены.\n"
+        "Посмотреть сессию: <code>/exams</code>\n"
+        "Ближайший экзамен: <code>/nearexam</code>" + FOOTER_LINK,
         parse_mode='HTML'
     )
-    manager.save_message(update.effective_chat.id, user_id, msg.message_id)
+    DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 async def send_exam_reminder(bot, chat_id, thread_id, exam, reminder_type):
     room_formatted = exam['room'].replace('"', "'")
