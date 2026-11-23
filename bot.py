@@ -18,10 +18,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "diag-13 teacher-full"
+BUILD = "json-1 proxy"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
-FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
+SITE_URL = "https://hekkeyne.ru/timetable/"
+FOOTER_LINK = ("\n\n<a href=\"" + SITE_URL + "\">Полное расписание на нашем сайте</a>"
+               "\n<a href=\"" + TIMETABLE_URL + "\">Полное расписание Паллада СибГУ</a>")
 KRASNOYARSK_TZ = pytz.timezone('Asia/Krasnoyarsk')
 DB_PATH = os.getenv("DB_PATH") or "schedule_bot.db"
 PUBLISH_DELAY_MINUTES = 2
@@ -32,10 +34,11 @@ LEGACY_GROUP_NAME = "БПА24-01"
 
 PENDING_GROUP = {}
 
-def group_link(group_id):
-    if not group_id:
-        return FOOTER_LINK
-    return f'\n\n<a href="https://timetable.pallada.sibsau.ru/timetable/group/{group_id}">Полное расписание на сайте</a>'
+def group_link(group_id, group_name=None):
+    ours = ss.site_link(group_name) if group_name else SITE_URL
+    pallada = f"{TIMETABLE_URL}/group/{group_id}" if group_id else TIMETABLE_URL
+    return (f'\n\n<a href="{ours}">Полное расписание на нашем сайте</a>'
+            f'\n<a href="{pallada}">Полное расписание Паллада СибГУ</a>')
 
 def esc(value):
     return html.escape(str(value if value is not None else ""))
@@ -238,7 +241,7 @@ async def group_by_query(update, query):
         return False
 
     if exact:
-        return {"group_id": exact["page_id"], "group_name": exact["name"]}
+        return {"group_id": exact["id"], "group_name": exact["name"]}
 
     if matches:
         names = ", ".join(esc(g["name"]) for g in matches)
@@ -256,7 +259,6 @@ def get_schedule_or_none(group_id):
     except ss.ScheduleError as exc:
         logging.warning("Не удалось получить расписание группы %s: %s", group_id, exc)
         return None
-    ss.start_teacher_resolution(group_id, schedule)
     return schedule
 
 async def require_group(update, manager):
@@ -303,7 +305,7 @@ def format_exams_list(schedule, sub):
     exams = schedule.get("exams") or []
     text = f"<b>Сессия: {esc(sub['group_name'])}</b>\n\n"
     if not exams:
-        return text + "Экзамены пока не опубликованы." + group_link(sub.get("group_id"))
+        return text + "Экзамены пока не опубликованы." + group_link(sub.get("group_id"), sub.get("group_name"))
 
     fallback = datetime.datetime.max.replace(tzinfo=KRASNOYARSK_TZ)
     for exam in sorted(exams, key=lambda item: exam_datetime(item) or fallback):
@@ -316,7 +318,7 @@ def format_exams_list(schedule, sub):
                  f"{esc(exam['date'])} в {esc(exam['time'])}, {left}\n"
                  f"{teacher_html(exam)}\n"
                  f"{esc(exam['room'])}\n\n")
-    return text.strip() + group_link(sub.get("group_id"))
+    return text.strip() + group_link(sub.get("group_id"), sub.get("group_name"))
 
 def format_nearest_exam(schedule, sub):
     now = datetime.datetime.now(KRASNOYARSK_TZ)
@@ -328,7 +330,7 @@ def format_nearest_exam(schedule, sub):
 
     text = f"<b>Ближайший экзамен: {esc(sub['group_name'])}</b>\n\n"
     if not upcoming:
-        return text + "Экзаменов впереди нет." + group_link(sub.get("group_id"))
+        return text + "Экзаменов впереди нет." + group_link(sub.get("group_id"), sub.get("group_name"))
 
     moment, exam = min(upcoming, key=lambda item: item[0])
     delta = moment - now
@@ -347,7 +349,7 @@ def format_nearest_exam(schedule, sub):
              f"{esc(exam['date'])} в {esc(exam['time'])}\n"
              f"{teacher_html(exam)}\n"
              f"{esc(exam['room'])}")
-    return text + group_link(sub.get("group_id"))
+    return text + group_link(sub.get("group_id"), sub.get("group_name"))
 
 async def cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manager = DatabaseManager()
@@ -523,12 +525,12 @@ async def apply_group(update, chat_id, thread_id, query):
         manager.save_message(chat_id, user_id, msg.message_id)
         return
 
-    manager.set_group(chat_id, thread_id, exact["page_id"], exact["name"], user_id,
+    manager.set_group(chat_id, thread_id, exact["id"], exact["name"], user_id,
                       update.effective_chat.title)
     PENDING_GROUP.pop((chat_id, thread_id), None)
 
-    sub = {"group_id": exact["page_id"], "group_name": exact["name"]}
-    schedule = get_schedule_or_none(exact["page_id"])
+    sub = {"group_id": exact["id"], "group_name": exact["name"]}
+    schedule = get_schedule_or_none(exact["id"])
     if schedule:
         text = (f"<b>Группа сохранена: {esc(exact['name'])}</b>\n"
                 f"Автоотправка после пар: <code>/setchat</code>\n\n"
@@ -587,7 +589,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += (f"\nСайт расписания: {esc(health)}\n"
              f"Источник: {ss.source_label()}\n"
              f"Сборка: <code>{BUILD}</code>")
-    text += group_link(sub.get("group_id") if sub else None)
+    text += group_link(sub.get("group_id") if sub else None,
+                       sub.get("group_name") if sub else None)
     msg = await update.message.reply_text(text, parse_mode='HTML')
     manager.save_message(chat_id, update.effective_user.id, msg.message_id)
 
@@ -628,7 +631,7 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Чат: <code>{target_chat}</code>{thread_info}\n"
         f"Группа: <code>{esc(sub['group_name'])}</code>\n"
         f"Отправка: после последней пары по Красноярску бот присылает расписание на завтра\n"
-        f"Выключить: <code>/disable_auto</code>" + group_link(sub.get("group_id")),
+        f"Выключить: <code>/disable_auto</code>" + group_link(sub.get("group_id"), sub.get("group_name")),
         parse_mode='HTML')
     manager.save_message(update.effective_chat.id, sender_id, msg.message_id)
 
@@ -920,8 +923,7 @@ def warm_up():
 
     for sub in subs:
         try:
-            schedule = ss.get_schedule(sub["group_id"])
-            ss.resolve_teachers(ss.collect_teachers(schedule))
+            ss.get_schedule(sub["group_id"])
             logging.info("Прогрев группы %s завершён", sub["group_id"])
         except Exception as exc:
             logging.warning("Прогрев группы %s не удался: %s", sub["group_id"], exc)
@@ -932,16 +934,12 @@ def teacher_html(item):
         return esc(item.get("teacher", ""))
     parts = []
     for link in links:
-        options = ss.teacher_options(link.get("name", ""), link.get("id"))
-        rendered = []
-        for option in options:
-            text = esc(option["text"])
-            target = option.get("id")
-            if target:
-                rendered.append(f'<a href="{ss.BASE_URL}/timetable/professor/{target}">{text}</a>')
-            else:
-                rendered.append(text)
-        parts.append(" или ".join(rendered) if len(rendered) > 1 else rendered[0])
+        name = esc(link.get("name") or "")
+        target = link.get("id")
+        if target:
+            parts.append(f'<a href="{ss.BASE_URL}/timetable/professor/{target}">{name}</a>')
+        else:
+            parts.append(name)
     return ", ".join(parts)
 
 
@@ -954,7 +952,7 @@ def format_schedule(schedule, sub, date):
     weekday = get_day_name(date)
     week_no = ss.week_number_for(date, schedule)
     lessons = ss.lessons_for(schedule, date)
-    footer = group_link(sub.get("group_id"))
+    footer = group_link(sub.get("group_id"), sub.get("group_name"))
 
     header = (f"Расписание на {get_russian_day(weekday)} ({date.strftime('%d.%m.%Y')})\n"
               f"Группа: {esc(sub['group_name'])}\n"
@@ -1011,7 +1009,7 @@ def format_week(schedule, sub, today):
         text += "\n"
 
     text += f"Неделя: {ss.week_number_for(today, schedule)}-я"
-    return text + group_link(sub.get("group_id"))
+    return text + group_link(sub.get("group_id"), sub.get("group_name"))
 
 def main():
     logging.basicConfig(
