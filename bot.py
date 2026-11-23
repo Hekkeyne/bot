@@ -17,7 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "diag-2 portable-upsert"
+BUILD = "diag-3 escape-html"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
@@ -38,6 +38,10 @@ def group_link(group_id):
     if not group_id:
         return FOOTER_LINK
     return f'\n\n<a href="https://timetable.pallada.sibsau.ru/timetable/group/{group_id}">Полное расписание на сайте</a>'
+
+
+def esc(value):
+    return html.escape(str(value if value is not None else ""))
 
 
 def dest_key(update):
@@ -465,13 +469,13 @@ async def apply_group(update, chat_id, thread_id, query):
         exact, matches = ss.find_group(query)
     except ss.ScheduleError as exc:
         msg = await update.message.reply_text(
-            f"Не удалось проверить группу: {exc}" + FOOTER_LINK, parse_mode='HTML')
+            f"Не удалось проверить группу: {esc(exc)}" + FOOTER_LINK, parse_mode='HTML')
         manager.save_message(chat_id, user_id, msg.message_id)
         return
 
     if not exact and matches:
         PENDING_GROUP[(chat_id, thread_id)] = time.time()
-        lines = "\n".join(f"• <code>{g['name']}</code>" for g in matches)
+        lines = "\n".join(f"• <code>{esc(g['name'])}</code>" for g in matches)
         msg = await update.message.reply_text(
             "Нашлось несколько групп, уточните название:\n\n" + lines, parse_mode='HTML')
         manager.save_message(chat_id, user_id, msg.message_id)
@@ -480,7 +484,7 @@ async def apply_group(update, chat_id, thread_id, query):
     if not exact:
         PENDING_GROUP[(chat_id, thread_id)] = time.time()
         msg = await update.message.reply_text(
-            f"Группа «{query}» не найдена. Пришлите название точнее, например <code>БПА24-01</code>.",
+            f"Группа «{esc(query)}» не найдена. Пришлите название точнее, например <code>БПА24-01</code>.",
             parse_mode='HTML')
         manager.save_message(chat_id, user_id, msg.message_id)
         return
@@ -491,11 +495,11 @@ async def apply_group(update, chat_id, thread_id, query):
     sub = {"group_id": exact["page_id"], "group_name": exact["name"]}
     schedule = get_schedule_or_none(exact["page_id"])
     if schedule:
-        text = (f"<b>Группа сохранена: {exact['name']}</b>\n"
+        text = (f"<b>Группа сохранена: {esc(exact['name'])}</b>\n"
                 f"Автоотправка после пар: <code>/setchat</code>\n\n"
                 + format_schedule(schedule, sub, datetime.date.today()))
     else:
-        text = (f"<b>Группа сохранена: {exact['name']}</b>\n\n"
+        text = (f"<b>Группа сохранена: {esc(exact['name'])}</b>\n\n"
                 "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
     msg = await update.message.reply_text(text, parse_mode='HTML')
     manager.save_message(chat_id, user_id, msg.message_id)
@@ -540,7 +544,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  "Задайте её командой <code>/group БПА24-01</code>.\n")
     else:
         auto = "включена" if sub.get("auto_enabled") else "выключена"
-        text += (f"Группа: <code>{sub['group_name']}</code>\n"
+        text += (f"Группа: <code>{esc(sub['group_name'])}</code>\n"
                  f"Автоотправка: {auto}\n")
         if sub.get("auto_enabled"):
             text += "Отправка: после последней пары → расписание на завтра\n"
@@ -590,7 +594,7 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(
         f"<b>Автоотправка включена</b>\n\n"
         f"Чат: <code>{target_chat}</code>{thread_info}\n"
-        f"Группа: <code>{sub['group_name']}</code>\n"
+        f"Группа: <code>{esc(sub['group_name'])}</code>\n"
         f"Отправка: после последней пары по Красноярску → расписание на завтра\n"
         f"Выключить: <code>/disable_auto</code>" + group_link(sub.get("group_id")),
         parse_mode='HTML')
@@ -1034,10 +1038,9 @@ async def post_init(application: Application):
     logging.info("Циклы автоотправки запущены")
 
 def lesson_block(lesson):
-    room = lesson["room"].replace('"', "'")
-    return (f"<b>{lesson['subject']}</b> ({lesson['type']})\n"
-            f"{lesson['teacher']}\n"
-            f"{room}\n\n")
+    return (f"<b>{esc(lesson['subject'])}</b> ({esc(lesson['type'])})\n"
+            f"{esc(lesson['teacher'])}\n"
+            f"{esc(lesson['room'])}\n\n")
 
 
 def format_schedule(schedule, sub, date):
@@ -1047,7 +1050,7 @@ def format_schedule(schedule, sub, date):
     footer = group_link(sub.get("group_id"))
 
     header = (f"Расписание на {get_russian_day(weekday)} ({date.strftime('%d.%m.%Y')})\n"
-              f"Группа: {sub['group_name']}\n"
+              f"Группа: {esc(sub['group_name'])}\n"
               f"Неделя: {week_no}-я\n")
     if not lessons:
         return header + "\nВыходной! Пар нет." + footer
@@ -1076,7 +1079,7 @@ def format_schedule(schedule, sub, date):
 
 def format_week(schedule, sub, today):
     monday = today - datetime.timedelta(days=today.weekday())
-    text = f"<b>Расписание на неделю</b>\nГруппа: {sub['group_name']}\n\n"
+    text = f"<b>Расписание на неделю</b>\nГруппа: {esc(sub['group_name'])}\n\n"
     for i in range(7):
         current = monday + datetime.timedelta(days=i)
         lessons = ss.lessons_for(schedule, current)
@@ -1094,10 +1097,11 @@ def format_week(schedule, sub, today):
             group = time_groups[time_slot]
             common = next((l for l in group if l["subgroup"] == "все"), None)
             if common:
-                text += f"{time_slot} | <b>{common['subject']}</b> ({common['type']})\n"
+                text += f"{time_slot} | <b>{esc(common['subject'])}</b> ({esc(common['type'])})\n"
             else:
                 for lesson in group:
-                    text += f"{time_slot} | {lesson['subgroup']}: <b>{lesson['subject']}</b> ({lesson['type']})\n"
+                    text += (f"{time_slot} | {esc(lesson['subgroup'])}: "
+                             f"<b>{esc(lesson['subject'])}</b> ({esc(lesson['type'])})\n")
         text += "\n"
 
     text += f"Неделя: {ss.week_number_for(today, schedule)}-я"
