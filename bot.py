@@ -5,6 +5,7 @@ import asyncio
 import os
 import time
 import html
+import threading
 
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram import Update
@@ -17,7 +18,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "diag-10 sendall"
+BUILD = "diag-11 fullnames"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
@@ -31,16 +32,13 @@ LEGACY_GROUP_NAME = "БПА24-01"
 
 PENDING_GROUP = {}
 
-
 def group_link(group_id):
     if not group_id:
         return FOOTER_LINK
     return f'\n\n<a href="https://timetable.pallada.sibsau.ru/timetable/group/{group_id}">Полное расписание на сайте</a>'
 
-
 def esc(value):
     return html.escape(str(value if value is not None else ""))
-
 
 def dest_key(update):
     chat_id = update.effective_chat.id
@@ -252,13 +250,14 @@ async def group_by_query(update, query):
     DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
     return False
 
-
 def get_schedule_or_none(group_id):
     try:
-        return ss.get_schedule(group_id)
+        schedule = ss.get_schedule(group_id)
     except ss.ScheduleError as exc:
         logging.warning("Не удалось получить расписание группы %s: %s", group_id, exc)
         return None
+    ss.start_teacher_resolution(group_id, schedule)
+    return schedule
 
 async def require_group(update, manager):
     chat_id, thread_id = dest_key(update)
@@ -315,7 +314,7 @@ def format_exams_list(schedule, sub):
             left = ""
         text += (f"<b>{esc(exam['subject'])}</b> ({esc(exam['type'])})\n"
                  f"{esc(exam['date'])} в {esc(exam['time'])}, {left}\n"
-                 f"{esc(exam['teacher'])}\n"
+                 f"{esc(ss.display_teacher(exam['teacher']))}\n"
                  f"{esc(exam['room'])}\n\n")
     return text.strip() + group_link(sub.get("group_id"))
 
@@ -346,7 +345,7 @@ def format_nearest_exam(schedule, sub):
     text += (f"{left}\n\n"
              f"<b>{esc(exam['subject'])}</b> ({esc(exam['type'])})\n"
              f"{esc(exam['date'])} в {esc(exam['time'])}\n"
-             f"{esc(exam['teacher'])}\n"
+             f"{esc(ss.display_teacher(exam['teacher']))}\n"
              f"{esc(exam['room'])}")
     return text + group_link(sub.get("group_id"))
 
@@ -497,7 +496,6 @@ def describe_place(sub):
         where += ", топик %s" % thread_id
     return where
 
-
 async def apply_group(update, chat_id, thread_id, query):
     manager = DatabaseManager()
     user_id = update.effective_user.id
@@ -541,7 +539,6 @@ async def apply_group(update, chat_id, thread_id, query):
     msg = await update.message.reply_text(text, parse_mode='HTML')
     manager.save_message(chat_id, user_id, msg.message_id)
 
-
 @with_cleanup
 async def group_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id, thread_id = dest_key(update)
@@ -553,7 +550,6 @@ async def group_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         DatabaseManager().save_message(chat_id, update.effective_user.id, msg.message_id)
         return
     await apply_group(update, chat_id, thread_id, query)
-
 
 async def group_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id, thread_id = dest_key(update)
@@ -568,7 +564,6 @@ async def group_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = (update.message.text or "").strip()
     if text:
         await apply_group(update, chat_id, thread_id, text)
-
 
 @with_cleanup
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -595,7 +590,6 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += group_link(sub.get("group_id") if sub else None)
     msg = await update.message.reply_text(text, parse_mode='HTML')
     manager.save_message(chat_id, update.effective_user.id, msg.message_id)
-
 
 @with_cleanup
 async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -657,7 +651,6 @@ async def autosends_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(text, parse_mode='HTML')
     manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
-
 @with_cleanup
 async def disable_auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manager = DatabaseManager()
@@ -693,7 +686,6 @@ def parse_id_list(value):
         return None
     return [int(part) for part in value.split(",") if part]
 
-
 async def send_text_to_subs(context, subs, text_to_send):
     sent = 0
     failed = 0
@@ -709,7 +701,6 @@ async def send_text_to_subs(context, subs, text_to_send):
             failed += 1
         await asyncio.sleep(1)
     return sent, failed
-
 
 @with_cleanup
 async def sendtext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -752,7 +743,6 @@ async def sendtext_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML'
     )
     manager.save_message(update.effective_chat.id, user_id, msg.message_id)
-
 
 @with_cleanup
 async def sendall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -918,12 +908,28 @@ async def auto_send_loop(application: Application):
 async def post_init(application: Application):
     asyncio.create_task(auto_send_loop(application))
     logging.info("Циклы автоотправки запущены")
+    threading.Thread(target=warm_up, daemon=True).start()
+
+def warm_up():
+    try:
+        manager = DatabaseManager()
+        subs = manager.get_auto_subscriptions()
+    except Exception as exc:
+        logging.warning("Прогрев при старте не удался: %s", exc)
+        return
+
+    for sub in subs:
+        try:
+            schedule = ss.get_schedule(sub["group_id"])
+            ss.resolve_teachers(ss.collect_teachers(schedule))
+            logging.info("Прогрев группы %s завершён", sub["group_id"])
+        except Exception as exc:
+            logging.warning("Прогрев группы %s не удался: %s", sub["group_id"], exc)
 
 def lesson_block(lesson):
     return (f"<b>{esc(lesson['subject'])}</b> ({esc(lesson['type'])})\n"
-            f"{esc(lesson['teacher'])}\n"
+            f"{esc(ss.display_teacher(lesson['teacher']))}\n"
             f"{esc(lesson['room'])}\n\n")
-
 
 def format_schedule(schedule, sub, date):
     weekday = get_day_name(date)
@@ -957,7 +963,6 @@ def format_schedule(schedule, sub, date):
             msg += "\n"
 
     return msg.strip() + footer
-
 
 def format_week(schedule, sub, today):
     monday = today - datetime.timedelta(days=today.weekday())

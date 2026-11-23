@@ -2,8 +2,10 @@ import re
 import os
 import time
 import json
+import logging
 import threading
 import datetime
+import concurrent.futures
 from urllib.parse import urlencode
 
 import requests
@@ -22,7 +24,6 @@ else:
     PROXY_URL = (_PROXY_ENV or DEFAULT_PROXY).rstrip("/")
 PROXY_TOKEN = (os.getenv("SCHEDULE_PROXY_TOKEN") or "").strip()
 
-
 def proxy_url(action, **params):
     if not PROXY_URL:
         return ""
@@ -30,10 +31,8 @@ def proxy_url(action, **params):
         params["token"] = PROXY_TOKEN
     return PROXY_URL + "?" + urlencode(dict(action=action, **params))
 
-
 def source_label():
     return "прокси" if PROXY_URL else "напрямую"
-
 
 def _error_text(response):
     try:
@@ -69,20 +68,16 @@ CACHE_TTL = 3600
 _cache = {}
 _cache_lock = threading.Lock()
 
-
 class ScheduleError(Exception):
     pass
-
 
 def _session():
     session = requests.Session()
     session.headers.update(HEADERS)
     return session
 
-
 def _clean(text):
     return re.sub(r"\s+", " ", text or "").strip()
-
 
 def search_groups(query, session=None):
     query = (query or "").strip()
@@ -105,7 +100,6 @@ def search_groups(query, session=None):
     except (TypeError, ValueError) as exc:
         raise ScheduleError("Неожиданный ответ поиска групп") from exc
     return [{"id": int(g["id"]), "name": _clean(g["name"])} for g in groups]
-
 
 def group_page_id(search_id, query, session=None):
     session = session or _session()
@@ -140,9 +134,10 @@ def group_page_id(search_id, query, session=None):
     location = response.headers.get("Location", "")
     found = GROUP_PAGE_RE.search(location)
     if not found:
+        if "/professor/" in location:
+            raise ScheduleError("Это преподаватель, а не группа")
         raise ScheduleError("Сайт не сообщил страницу группы %s" % search_id)
     return int(found.group(1))
-
 
 def find_group(query):
     matches = search_groups(query)
@@ -152,7 +147,6 @@ def find_group(query):
         exact = dict(exact)
         exact["page_id"] = group_page_id(exact["id"], exact["name"])
     return exact, matches
-
 
 def fetch_group_html(group_id, session=None):
     session = session or _session()
@@ -165,7 +159,6 @@ def fetch_group_html(group_id, session=None):
     except requests.RequestException as exc:
         raise ScheduleError("Не удалось загрузить страницу группы %s: %s" % (group_id, exc)) from exc
     return response.text
-
 
 def _parse_lesson(ul):
     subject = ""
@@ -216,7 +209,6 @@ def _parse_lesson(ul):
         "subgroup": subgroup,
     }
 
-
 def _parse_session(tab):
     exams = []
     for day_div in tab.find_all("div", class_="day"):
@@ -250,7 +242,6 @@ def _parse_session(tab):
                     "room": lesson["room"],
                 })
     return exams
-
 
 def parse_group_html(html):
     soup = BeautifulSoup(html, "lxml")
@@ -326,10 +317,8 @@ def parse_group_html(html):
         "exams": exams,
     }
 
-
 def load_schedule(group_id, session=None):
     return parse_group_html(fetch_group_html(group_id, session=session))
-
 
 def check_site():
     try:
@@ -338,6 +327,119 @@ def check_site():
         return "недоступен (%s)" % exc
     return "доступен, групп получено: %d" % len(groups)
 
+_teacher_cache = {}
+_teacher_lock = threading.Lock()
+
+def _split_short(name):
+    cleaned = (name or "").replace(".", " ")
+    parts = [part for part in cleaned.split() if part]
+    if not parts:
+        return "", []
+    return parts[0], [part[0] for part in parts[1:]]
+
+def _match_teacher(short, candidates):
+    surname, initials = _split_short(short)
+    if not surname:
+        return None
+    matches = []
+    for candidate in candidates:
+        words = candidate["name"].split()
+        if len(words) < 1 + len(initials):
+            continue
+        if words[0].lower() != surname.lower():
+            continue
+        if all(words[1 + index][0].upper() == initials[index].upper()
+               for index in range(len(initials))):
+            matches.append(candidate["name"])
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+def resolve_teacher(short, session=None):
+    key = _clean(short)
+    if not key:
+        return ""
+    with _teacher_lock:
+        if key in _teacher_cache:
+            return _teacher_cache[key]
+
+    surname, initials = _split_short(key)
+    full = key
+    if surname:
+        query = surname if not initials else "%s %s" % (surname, initials[0])
+        try:
+            candidates = search_groups(query, session=session)
+        except ScheduleError:
+            return key
+        matched = _match_teacher(key, candidates)
+        if matched:
+            full = matched
+
+    with _teacher_lock:
+        _teacher_cache[key] = full
+    return full
+
+def _teacher_parts(value):
+    return [part.strip() for part in (value or "").split(",") if part.strip()]
+
+def resolve_teachers(values):
+    pending = set()
+    for value in values:
+        for part in _teacher_parts(value):
+            with _teacher_lock:
+                if part not in _teacher_cache:
+                    pending.add(part)
+    if not pending:
+        return
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(resolve_teacher, pending))
+
+def display_teacher(value):
+    if not value:
+        return ""
+    parts = []
+    for part in _teacher_parts(value):
+        with _teacher_lock:
+            full = _teacher_cache.get(part)
+        if full and full != part:
+            words = full.split()
+            guess = " ".join(words[1:]) if len(words) > 1 else full
+            parts.append("%s (возм. %s)" % (part, guess))
+        else:
+            parts.append(part)
+    return ", ".join(parts)
+
+def collect_teachers(schedule):
+    names = []
+    for week in (schedule.get("weeks") or {}).values():
+        for lessons in week.values():
+            for lesson in lessons:
+                if lesson.get("teacher"):
+                    names.append(lesson["teacher"])
+    for exam in schedule.get("exams") or []:
+        if exam.get("teacher"):
+            names.append(exam["teacher"])
+    return names
+
+_resolving = set()
+_resolving_lock = threading.Lock()
+
+def start_teacher_resolution(group_id, schedule):
+    with _resolving_lock:
+        if group_id in _resolving:
+            return
+        _resolving.add(group_id)
+
+    def worker():
+        try:
+            resolve_teachers(collect_teachers(schedule))
+        except Exception as exc:
+            logging.warning("Не удалось получить полные имена преподавателей: %s", exc)
+        finally:
+            with _resolving_lock:
+                _resolving.discard(group_id)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 def get_schedule(group_id, force=False, ttl=CACHE_TTL):
     now = time.time()
@@ -356,8 +458,8 @@ def get_schedule(group_id, force=False, ttl=CACHE_TTL):
 
     with _cache_lock:
         _cache[group_id] = {"ts": now, "data": data}
-    return data
 
+    return data
 
 def week_number_for(date, schedule):
     ref_date = schedule.get("ref_date")
@@ -371,12 +473,10 @@ def week_number_for(date, schedule):
     weeks_delta = round((m_cur - m_ref).days / 7)
     return ((ref_week - 1 + weeks_delta) % 2) + 1
 
-
 def lessons_for(schedule, date):
     week_no = str(week_number_for(date, schedule))
     weekday = WEEKDAYS[date.weekday()]
     return schedule.get("weeks", {}).get(week_no, {}).get(weekday, [])
-
 
 def last_lesson_end_time(lessons):
     ends = []

@@ -125,6 +125,9 @@ try {
 
         $location = header_value($posted['headers'], 'Location');
         if (!preg_match('#/timetable/group/(\d+)#', $location, $found)) {
+            if (strpos($location, '/professor/') !== false) {
+                fail('это преподаватель, а не группа', 400);
+            }
             fail('сайт не сообщил страницу группы');
         }
         $body = json_encode(['page_id' => (int) $found[1]], JSON_UNESCAPED_UNICODE);
