@@ -129,7 +129,7 @@ function tgEscape(text) {
 
       var timeEl = document.createElement("span");
       timeEl.className = "time";
-      timeEl.textContent = String(lesson[0] || "") + "\\u2013" + String(lesson[1] || "");
+      timeEl.textContent = String(lesson[0] || "") + "-" + String(lesson[1] || "");
 
       var bodyEl = document.createElement("span");
       bodyEl.className = "body";

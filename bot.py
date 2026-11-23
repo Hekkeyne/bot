@@ -19,7 +19,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "widget-1 ptb22"
+BUILD = "tz-1 ptb22"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 SITE_URL = "https://hekkeyne.ru/timetable/"
@@ -243,6 +243,9 @@ class DatabaseManager:
                 self.set_auto(row['auto_chat_id'], thread_id, True)
             logging.info("Перенесена старая настройка: чат %s, топик %s", row['auto_chat_id'], thread_id)
 
+def kras_today():
+    return datetime.datetime.now(KRASNOYARSK_TZ).date()
+
 def get_day_name(date):
     days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
     return days[date.weekday()]
@@ -318,7 +321,7 @@ def exam_datetime(exam):
     return KRASNOYARSK_TZ.localize(moment)
 
 def days_left_text(date):
-    delta = (date - datetime.date.today()).days
+    delta = (date - kras_today()).days
     if delta < 0:
         return "уже прошёл"
     if delta == 0:
@@ -415,21 +418,21 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "<b>Бот расписания</b>\n\n"
         "<b>Сначала задайте группу:</b>\n"
-        "/group БПА24-01 — задать или сменить группу для этого чата/топика\n"
-        "/status — что сейчас настроено для этого чата\n\n"
+        "/group БПА24-01 - задать или сменить группу для этого чата/топика\n"
+        "/status - что сейчас настроено для этого чата\n\n"
         "<b>Расписание:</b>\n"
-        "/today — сегодня\n"
-        "/tomorrow — завтра\n"
-        "/week — вся неделя\n"
-        "/day &lt;день&gt; — конкретный день\n"
+        "/today - сегодня\n"
+        "/tomorrow - завтра\n"
+        "/week - вся неделя\n"
+        "/day &lt;день&gt; - конкретный день\n"
         "Группу можно указать сразу, без сохранения:\n"
         "/tomorrow БПА24-02, /week БПА24-02, /day вторник БПА24-02\n\n"
         "<b>Сессия:</b>\n"
-        "/exams — все экзамены группы\n"
-        "/nearexam — ближайший экзамен\n\n"
+        "/exams - все экзамены группы\n"
+        "/nearexam - ближайший экзамен\n\n"
         "<b>Автоотправка:</b>\n"
-        "/setchat — публиковать расписание в этот чат после последней пары\n"
-        "/disable_auto — выключить здесь или по номеру: /disable_auto 2\n"
+        "/setchat - публиковать расписание в этот чат после последней пары\n"
+        "/disable_auto - выключить здесь или по номеру: /disable_auto 2\n"
         + FOOTER_LINK
     )
     msg = await update.message.reply_text(text, parse_mode='HTML')
@@ -444,7 +447,7 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sub = chosen or await require_group(update, manager)
     if not sub:
         return
-    today = datetime.date.today()
+    today = kras_today()
     schedule = get_schedule_or_none(sub["group_id"])
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
@@ -460,7 +463,7 @@ async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sub = chosen or await require_group(update, manager)
     if not sub:
         return
-    tmr = datetime.date.today() + datetime.timedelta(days=1)
+    tmr = kras_today() + datetime.timedelta(days=1)
     schedule = get_schedule_or_none(sub["group_id"])
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
@@ -491,7 +494,7 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sub = chosen or await require_group(update, manager)
     if not sub:
         return
-    target = datetime.date.today()
+    target = kras_today()
     while get_day_name(target) != day:
         target += datetime.timedelta(days=1)
     schedule = get_schedule_or_none(sub["group_id"])
@@ -509,7 +512,7 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sub = chosen or await require_group(update, manager)
     if not sub:
         return
-    today = datetime.date.today()
+    today = kras_today()
     schedule = get_schedule_or_none(sub["group_id"])
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
@@ -563,7 +566,7 @@ async def apply_group(update, chat_id, thread_id, query):
     sub = {"group_id": exact["id"], "group_name": exact["name"]}
     schedule = get_schedule_or_none(exact["id"])
     if schedule:
-        await deliver_day(update, manager, schedule, sub, datetime.date.today(),
+        await deliver_day(update, manager, schedule, sub, kras_today(),
                           header=f"Группа сохранена: {exact['name']}")
     else:
         msg = await update.message.reply_text(
@@ -677,8 +680,8 @@ async def autosends_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "<b>Автоотправки</b>\n\n"
         for sub in subs:
             status = "включена" if sub.get("auto_enabled") else "выключена"
-            text += (f"{sub['id']}. {esc(describe_place(sub))} — "
-                     f"{esc(sub.get('group_name') or 'без группы')} — {status}\n")
+            text += (f"{sub['id']}. {esc(describe_place(sub))} - "
+                     f"{esc(sub.get('group_name') or 'без группы')} - {status}\n")
         text += ("\nОтключить по номеру: <code>/disable_auto 1</code>\n"
                  "Отключить здешнюю: <code>/disable_auto</code>" + FOOTER_LINK)
     msg = await update.message.reply_text(text, parse_mode='HTML')
@@ -697,7 +700,7 @@ async def disable_auto_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             manager.set_auto_by_id(sub["id"], False)
             text = (f"Автоотправка выключена:\n"
-                    f"{esc(describe_place(sub))} — "
+                    f"{esc(describe_place(sub))} - "
                     f"{esc(sub.get('group_name') or 'без группы')}" + FOOTER_LINK)
     else:
         chat_id, thread_id = dest_key(update)
@@ -895,7 +898,7 @@ async def schedule_auto_send(app: Application):
         current = datetime.datetime.now(KRASNOYARSK_TZ)
         if current < trigger:
             wait = (trigger - current).total_seconds()
-            logging.info("Автоотправка: чат %s — через %.1f мин (в %s)",
+            logging.info("Автоотправка: чат %s - через %.1f мин (в %s)",
                          sub["chat_id"], wait / 60, trigger.strftime("%H:%M"))
             await asyncio.sleep(wait)
 
