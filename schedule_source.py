@@ -4,7 +4,7 @@ import time
 import json
 import threading
 import datetime
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 
 import requests
 from bs4 import BeautifulSoup
@@ -357,11 +357,6 @@ def get_schedule(group_id, force=False, ttl=CACHE_TTL):
     with _cache_lock:
         _cache[group_id] = {"ts": now, "data": data}
     return data
-
-
-def clear_cache():
-    with _cache_lock:
-        _cache.clear()
 
 
 def week_number_for(date, schedule):

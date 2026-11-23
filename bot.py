@@ -17,7 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "diag-8 exams-clean"
+BUILD = "diag-9 clean"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
@@ -28,8 +28,6 @@ STALE_PUBLISH_LIMIT = datetime.timedelta(hours=3)
 GROUP_PROMPT_TTL = 600
 LEGACY_GROUP_ID = 13922
 LEGACY_GROUP_NAME = "БПА24-01"
-
-EXAMS = []
 
 PENDING_GROUP = {}
 
@@ -109,30 +107,6 @@ class DatabaseManager:
                     message_thread_id INTEGER,
                     auto_enabled BOOLEAN DEFAULT 1,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS exam_reminders (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    chat_id INTEGER,
-                    message_thread_id INTEGER,
-                    exam_date DATE,
-                    exam_time TIME,
-                    subject TEXT,
-                    reminder_enabled BOOLEAN DEFAULT 1,
-                    last_reminder_sent TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS sent_reminders (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    chat_id INTEGER,
-                    exam_date DATE,
-                    reminder_type TEXT,
-                    sent_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             conn.execute('''
@@ -241,53 +215,6 @@ class DatabaseManager:
             if row['auto_enabled']:
                 self.set_auto(row['auto_chat_id'], thread_id, True)
             logging.info("Перенесена старая настройка: чат %s, топик %s", row['auto_chat_id'], thread_id)
-
-    def set_exam_reminder(self, user_id, chat_id, thread_id, exam_date, exam_time, subject):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute('''
-                INSERT OR REPLACE INTO exam_reminders
-                (user_id, chat_id, message_thread_id, exam_date, exam_time, subject, reminder_enabled)
-                VALUES (?, ?, ?, ?, ?, ?, 1)
-            ''', (user_id, chat_id, thread_id, exam_date, exam_time, subject))
-
-    def get_active_exam_reminders(self):
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.execute('''
-                SELECT user_id, chat_id, message_thread_id, exam_date, exam_time, subject
-                FROM exam_reminders
-                WHERE reminder_enabled = 1
-                ORDER BY exam_date, exam_time
-            ''')
-            return cur.fetchall()
-
-    def disable_exam_reminder(self, user_id, exam_date, exam_time):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute('''
-                UPDATE exam_reminders
-                SET reminder_enabled = 0
-                WHERE user_id = ? AND exam_date = ? AND exam_time = ?
-            ''', (user_id, exam_date, exam_time))
-
-    def mark_reminder_sent(self, user_id, chat_id, exam_date, reminder_type):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute('''
-                INSERT INTO sent_reminders (user_id, chat_id, exam_date, reminder_type)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, chat_id, exam_date, reminder_type))
-
-    def was_reminder_sent(self, user_id, chat_id, exam_date, reminder_type):
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.execute('''
-                SELECT COUNT(*) FROM sent_reminders
-                WHERE user_id = ? AND chat_id = ? AND exam_date = ? AND reminder_type = ?
-            ''', (user_id, chat_id, exam_date, reminder_type))
-            return cur.fetchone()[0] > 0
-
-    def clear_old_reminders(self, exam_date):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute('''
-                DELETE FROM sent_reminders WHERE exam_date < ?
-            ''', (exam_date,))
 
 def get_day_name(date):
     days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -845,180 +772,6 @@ async def nearexam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(text, parse_mode='HTML')
     manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
-async def send_exam_reminder(bot, chat_id, thread_id, exam, reminder_type):
-    room_formatted = exam['room'].replace('"', "'")
-
-    if reminder_type == "3_days":
-        text = f"<b>Напоминание об экзамене</b>\n\n"
-        text += f"Через 3 дня: <b>{exam['subject']}</b>\n"
-        text += f"{exam['date']} в {exam['time']}\n"
-        text += f"{exam['teacher']}\n"
-        text += f"{room_formatted}"
-    elif reminder_type == "1_day":
-        text = f"<b>Напоминание об экзамене</b>\n\n"
-        text += f"Завтра: <b>{exam['subject']}</b>\n"
-        text += f"{exam['date']} в {exam['time']}\n"
-        text += f"{exam['teacher']}\n"
-        text += f"{room_formatted}"
-    elif reminder_type == "1_hour":
-        text = f"<b>Сегодня экзамен</b>\n\n"
-        text += f"Через 1 час: <b>{exam['subject']}</b>\n"
-        text += f"{exam['date']} в {exam['time']}\n"
-        text += f"{exam['teacher']}\n"
-        text += f"{room_formatted}\n\n"
-        text += f"пасасете"
-    elif reminder_type == "6_hours":
-        text = f"<b>Экзамен: {exam['subject']}</b>\n\n"
-        text += f"Начался в {exam['time']}"
-
-    try:
-        if thread_id:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode='HTML',
-                message_thread_id=thread_id
-            )
-        else:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode='HTML'
-            )
-        return True
-    except Exception as e:
-        logging.error(f"Ошибка отправки напоминания: {e}")
-        return False
-
-async def get_next_exam_reminder_time():
-    if not EXAMS:
-        return None, None
-
-    now = datetime.datetime.now(KRASNOYARSK_TZ)
-    manager = DatabaseManager()
-    reminders = manager.get_active_exam_reminders()
-
-    next_reminder_time = None
-    next_reminder_data = None
-
-    for user_id, chat_id, thread_id, exam_date_str, exam_time_str, subject in reminders:
-        exam_dt = parse_exam_datetime(exam_date_str, exam_time_str)
-        if not exam_dt:
-            continue
-
-        exam_dt = KRASNOYARSK_TZ.localize(exam_dt) if exam_dt.tzinfo is None else exam_dt
-
-        if exam_dt <= now:
-            continue
-
-        reminder_times = {
-            "3_days": exam_dt - datetime.timedelta(days=3),
-            "1_day": exam_dt - datetime.timedelta(days=1),
-            "1_hour": exam_dt - datetime.timedelta(hours=1),
-            "6_hours": exam_dt + datetime.timedelta(hours=6)
-        }
-
-        for reminder_type, reminder_time in reminder_times.items():
-            if reminder_time <= now:
-                continue
-
-            if manager.was_reminder_sent(user_id, chat_id, exam_date_str, reminder_type):
-                continue
-
-            if next_reminder_time is None or reminder_time < next_reminder_time:
-                next_reminder_time = reminder_time
-                next_reminder_data = {
-                    "user_id": user_id,
-                    "chat_id": chat_id,
-                    "thread_id": thread_id,
-                    "exam_date": exam_date_str,
-                    "exam_time": exam_time_str,
-                    "subject": subject,
-                    "reminder_type": reminder_type,
-                    "exam_dt": exam_dt
-                }
-
-    return next_reminder_time, next_reminder_data
-
-async def exam_reminder_loop(application: Application):
-    logging.info("Цикл напоминаний об экзаменах запущен")
-
-    while True:
-        try:
-            next_time, reminder_data = await get_next_exam_reminder_time()
-
-            if next_time is None:
-                logging.info("Нет активных напоминаний об экзаменах, следующая проверка через час")
-                await asyncio.sleep(3600)
-                continue
-
-            now = datetime.datetime.now(KRASNOYARSK_TZ)
-            seconds_to_wait = (next_time - now).total_seconds()
-
-            if seconds_to_wait <= 0:
-                logging.info(f"Время напоминания наступило, отправляем...")
-            else:
-                logging.info(
-                    f"Следующее напоминание через {seconds_to_wait/3600:.1f} ч "
-                    f"({next_time.strftime('%d.%m %H:%M')}): "
-                    f"{reminder_data['subject']} ({reminder_data['reminder_type']})"
-                )
-                await asyncio.sleep(seconds_to_wait)
-
-            exam = next(
-                (e for e in EXAMS
-                 if e['date'] == reminder_data['exam_date'] and e['time'] == reminder_data['exam_time']),
-                None
-            )
-
-            if exam:
-                manager = DatabaseManager()
-                success = await send_exam_reminder(
-                    application.bot,
-                    reminder_data['chat_id'],
-                    reminder_data['thread_id'],
-                    exam,
-                    reminder_data['reminder_type']
-                )
-
-                if success:
-                    manager.mark_reminder_sent(
-                        reminder_data['user_id'],
-                        reminder_data['chat_id'],
-                        reminder_data['exam_date'],
-                        reminder_data['reminder_type']
-                    )
-                    logging.info(
-                        f"Отправлено напоминание ({reminder_data['reminder_type']}) "
-                        f"пользователю {reminder_data['user_id']} об экзамене {reminder_data['subject']}"
-                    )
-
-                    if reminder_data['reminder_type'] == "6_hours":
-                        next_exam = None
-                        exam_dt = reminder_data['exam_dt']
-
-                        for e in EXAMS:
-                            e_dt = parse_exam_datetime(e['date'], e['time'])
-                            if e_dt:
-                                e_dt = KRASNOYARSK_TZ.localize(e_dt) if e_dt.tzinfo is None else e_dt
-                                if e_dt > exam_dt:
-                                    if next_exam is None or parse_exam_datetime(e['date'], e['time']) < parse_exam_datetime(next_exam['date'], next_exam['time']):
-                                        next_exam = e
-
-                        if next_exam:
-                            logging.info(f"Найден следующий экзамен: {next_exam['subject']}, запускаем алгоритм напоминаний")
-                else:
-                    logging.error(f"Не удалось отправить напоминание")
-
-            await asyncio.sleep(1)
-
-        except asyncio.CancelledError:
-            logging.info("Цикл напоминаний об экзаменах остановлен")
-            break
-        except Exception as e:
-            logging.error(f"Ошибка в цикле напоминаний об экзаменах: {e}")
-            await asyncio.sleep(60)
-
 async def send_schedule_to(bot, sub, schedule, date):
     text = format_schedule(schedule, sub, date)
     kwargs = {"chat_id": sub["chat_id"], "text": text, "parse_mode": "HTML"}
@@ -1121,7 +874,6 @@ async def auto_send_loop(application: Application):
 
 async def post_init(application: Application):
     asyncio.create_task(auto_send_loop(application))
-    asyncio.create_task(exam_reminder_loop(application))
     logging.info("Циклы автоотправки запущены")
 
 def lesson_block(lesson):
@@ -1224,7 +976,7 @@ def main():
 
     app.add_error_handler(error_handler)
 
-    print("Бот запущен!")
+    logging.info("Бот запущен")
     app.run_polling()
 
 if __name__ == "__main__":
