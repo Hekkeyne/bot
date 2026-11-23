@@ -17,7 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "diag-7 exams"
+BUILD = "diag-8 exams-clean"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 FOOTER_LINK = f'\n\n<a href="{TIMETABLE_URL}">Полное расписание на сайте</a>'
@@ -845,16 +845,6 @@ async def nearexam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(text, parse_mode='HTML')
     manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
-@with_cleanup
-async def setexam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text(
-        "Напоминания об экзаменах пока не включены.\n"
-        "Посмотреть сессию: <code>/exams</code>\n"
-        "Ближайший экзамен: <code>/nearexam</code>" + FOOTER_LINK,
-        parse_mode='HTML'
-    )
-    DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
-
 async def send_exam_reminder(bot, chat_id, thread_id, exam, reminder_type):
     room_formatted = exam['room'].replace('"', "'")
 
@@ -1229,7 +1219,6 @@ def main():
 
     app.add_handler(CommandHandler("exams", exams_cmd))
     app.add_handler(CommandHandler("nearexam", nearexam_cmd))
-    app.add_handler(CommandHandler("setexam", setexam_cmd))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_text_handler))
 
