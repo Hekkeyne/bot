@@ -364,3 +364,5 @@ FodyWeavers.xsd
 
 
 .env
+schedule_state.json
+schedule_bot.db
