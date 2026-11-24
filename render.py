@@ -168,8 +168,8 @@ def caption(schedule, sub, date=None, week=False):
     pallada = ss.pallada_link(group_id)
     return (f"<b>{html.escape(title)}</b>\n"
             f"{html.escape(group)}\n\n"
-            f'<a href="{ours}">Наш сайт</a>\n'
-            f'<a href="{pallada}">Паллада</a>')
+            f'<a href="{ours}">Полное расписание на нашем сайте</a>\n'
+            f'<a href="{pallada}">Полное расписание Паллада СибГУ</a>')
 
 
 def qr_url(sub):
@@ -203,7 +203,7 @@ def render_day(schedule, sub, date, theme_key="default", today=None):
             height += 32
         return height
 
-    height = pad + 108
+    height = pad + 108 + 68
     for _, items in slots:
         right = sum(part_height(item) + 12 for item in items)
         height += max(44, right) + 44 + 20
