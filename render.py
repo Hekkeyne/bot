@@ -1,11 +1,15 @@
 import datetime
 import html
 import io
+import ipaddress
 import os
+import socket
 from functools import lru_cache
+from urllib.parse import urljoin, urlparse
 
 import qrcode
-from PIL import Image, ImageDraw, ImageFont
+import requests
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from qrcode.constants import ERROR_CORRECT_M
 
 import schedule_source as ss
@@ -94,6 +98,8 @@ def theme(name, mode="light", custom=None):
             base.update(DARK_THEMES["default"])
         base.update(custom.get(mode) or {})
         base["label"] = custom.get("label") or "Своя"
+        base["bgImage"] = base.get("bgImage") or custom.get("bgImage") or ""
+        base["panelImage"] = base.get("panelImage") or custom.get("panelImage") or ""
         return base
     base = dict(THEMES.get(name) or THEMES["default"])
     if mode == "dark":
@@ -105,6 +111,97 @@ def theme_label(name, custom=None):
     if name == "custom" and isinstance(custom, dict):
         return custom.get("label") or "Своя"
     return THEMES.get(name, THEMES["default"])["label"]
+
+
+BACKGROUND_CACHE = {}
+
+
+def safe_image_url(url):
+    parsed = urlparse(str(url or "").strip())
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        infos = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    except (socket.gaierror, ValueError):
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if address.version == 6 and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        if (address.is_private or address.is_loopback or address.is_link_local
+                or address.is_reserved or address.is_multicast or address.is_unspecified):
+            return False
+    return True
+
+
+def fetch_image(url):
+    current = str(url or "").strip()
+    for _ in range(4):
+        if not safe_image_url(current):
+            return None
+        try:
+            with requests.get(current, timeout=6, stream=True, allow_redirects=False,
+                              headers={"User-Agent": "Mozilla/5.0"}) as response:
+                if response.is_redirect:
+                    location = response.headers.get("Location")
+                    if not location:
+                        return None
+                    current = urljoin(current, location)
+                    continue
+                if response.status_code != 200:
+                    return None
+                content_type = (response.headers.get("Content-Type") or "").lower()
+                if not content_type.startswith("image/"):
+                    return None
+                data = bytearray()
+                for chunk in response.iter_content(65536):
+                    data.extend(chunk)
+                    if len(data) > 8 * 1024 * 1024:
+                        return None
+                return bytes(data)
+        except requests.RequestException:
+            return None
+    return None
+
+
+def background_image(url):
+    value = str(url or "").strip()
+    if not value:
+        return None
+    if value in BACKGROUND_CACHE:
+        return BACKGROUND_CACHE[value]
+    data = fetch_image(value)
+    if not data:
+        return None
+    try:
+        image = Image.open(io.BytesIO(data))
+        if image.width * image.height > 40000000:
+            return None
+        image = image.convert("RGB")
+        image.load()
+    except Exception:
+        return None
+    if len(BACKGROUND_CACHE) >= 8:
+        BACKGROUND_CACHE.pop(next(iter(BACKGROUND_CACHE)))
+    BACKGROUND_CACHE[value] = image
+    return image
+
+
+def cover_image(image, width, height):
+    return ImageOps.fit(image, (width, height), method=Image.LANCZOS, centering=(0.5, 0.5))
+
+
+def canvas_for(th, width, height):
+    background = background_image(th.get("bgImage"))
+    if background is not None:
+        return cover_image(background, width, height)
+    return Image.new("RGB", (width, height), th["bg"])
 
 
 @lru_cache(maxsize=64)
@@ -191,12 +288,23 @@ def qr_image(url, size, color):
     return image.resize((size, size), Image.NEAREST)
 
 
-def card(draw, x, y, width, height, th):
+def card(draw, x, y, width, height, th, image=None):
     radius = int(th.get("radius") or 0)
     if th.get("shadow", True):
         draw.rounded_rectangle([x + 4, y + 4, x + width + 4, y + height + 4], radius=radius, fill=th["edge"])
     draw.rounded_rectangle([x, y, x + width, y + height], radius=radius, fill=th["panel"],
                            outline=th["line"], width=2)
+    panel_url = th.get("panelImage")
+    if image is not None and panel_url:
+        panel = background_image(panel_url)
+        if panel is not None:
+            box_width = max(1, int(round(width)))
+            box_height = max(1, int(round(height)))
+            fitted = cover_image(panel, box_width, box_height)
+            mask = Image.new("L", (box_width, box_height), 0)
+            ImageDraw.Draw(mask).rounded_rectangle([0, 0, box_width, box_height], radius=radius, fill=255)
+            image.paste(fitted, (int(round(x)), int(round(y))), mask)
+            draw.rounded_rectangle([x, y, x + width, y + height], radius=radius, outline=th["line"], width=2)
 
 
 def draw_text(draw, x, y, text, face, color):
@@ -263,7 +371,7 @@ def render_day(schedule, sub, date, theme_key="default", today=None, mode="light
     footer_top = height - 12
     height += 32
 
-    image = Image.new("RGB", (width, height), th["bg"])
+    image = canvas_for(th, width, height)
     draw = ImageDraw.Draw(image)
 
     draw_text(draw, pad, pad, "Расписание", font(48, True), th["ink"])
@@ -281,14 +389,14 @@ def render_day(schedule, sub, date, theme_key="default", today=None, mode="light
     y += 68
 
     if not slots:
-        card(draw, pad, y, inner, 64, th)
+        card(draw, pad, y, inner, 64, th, image)
         draw_text(draw, pad + 28, y + 18, "нет пар", font(26), th["muted"])
         y += 84
     else:
         for time_slot, items in slots:
             right = sum(part_height(item) + 12 for item in items)
             card_height = max(44, right) + 44
-            card(draw, pad, y, inner, card_height, th)
+            card(draw, pad, y, inner, card_height, th, image)
             parts = str(time_slot or "").split("-")
             draw_text(draw, pad + 28, y + 24, parts[0] if parts else "", font(24, True), th["muted"])
             draw_text(draw, pad + 28, y + 54, parts[1] if len(parts) > 1 else "", font(22), th["muted"])
@@ -356,7 +464,7 @@ def render_week(schedule, sub, monday, theme_key="default", mode="light", custom
         return height + 16
 
     def draw_day(day, x, y, card_width, card_height):
-        card(draw, x, y, card_width, card_height, th)
+        card(draw, x, y, card_width, card_height, th, image)
         draw.rounded_rectangle([x + 20, y + 20, x + card_width - 20, y + 64],
                                radius=int(th.get("radius") or 0), fill=th["ink"])
         draw_text(draw, x + 36, y + 28, ss.WEEKDAYS_RU[ss.WEEKDAYS[day.weekday()]], font(24, True), th["on_ink"])
@@ -400,7 +508,7 @@ def render_week(schedule, sub, monday, theme_key="default", mode="light", custom
     footer_top = grid_top + grid_height + 16
     height = footer_top + 40
 
-    image = Image.new("RGB", (width, height), th["bg"])
+    image = canvas_for(th, width, height)
     draw = ImageDraw.Draw(image)
 
     draw_text(draw, pad, pad, "Расписание", font(48, True), th["ink"])

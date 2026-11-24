@@ -21,7 +21,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "theme-qr-1 ptb22"
+BUILD = "theme-photo-1 ptb22"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 SITE_URL = "https://hekkeyne.ru/timetable/"

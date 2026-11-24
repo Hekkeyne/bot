@@ -33,19 +33,28 @@ def decode_qr(data):
     image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     if image is None:
         return ""
-    detector = cv2.QRCodeDetector()
-    variants = [image]
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    variants = [image, gray]
     height, width = image.shape[:2]
     if max(height, width) < 1200:
-        variants.append(cv2.resize(image, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC))
-    variants.append(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY))
-    for variant in variants:
+        scaled = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST)
+        variants.append(scaled)
+        _, threshold = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        variants.append(threshold)
+    detectors = [cv2.QRCodeDetector()]
+    if hasattr(cv2, "QRCodeDetectorAruco"):
         try:
-            text, _, _ = detector.detectAndDecode(variant)
+            detectors.append(cv2.QRCodeDetectorAruco())
         except cv2.error:
-            text = ""
-        if text:
-            return text.strip()
+            pass
+    for detector in detectors:
+        for variant in variants:
+            try:
+                text, _, _ = detector.detectAndDecode(variant)
+            except cv2.error:
+                text = ""
+            if text:
+                return text.strip()
     return ""
 
 
@@ -88,6 +97,15 @@ def normalize_color(value, fallback):
     return "#%02x%02x%02x" % tuple(rgb)
 
 
+def image_url(value):
+    source = str(value or "").strip()
+    if source.startswith("//"):
+        source = "https:" + source
+    if urlparse(source).scheme in ("http", "https"):
+        return source
+    return ""
+
+
 def fix_contrast(palette):
     bg = render.relative_luminance(palette["bg"])
     ink = render.relative_luminance(palette["ink"])
@@ -109,8 +127,16 @@ def to_theme(style):
         source = (style.get("colors") or {}).get(mode)
         if isinstance(source, dict):
             for site_key, bot_key in COLOR_MAP.items():
-                if site_key in source:
-                    base[bot_key] = normalize_color(source[site_key], base[bot_key])
+                if site_key not in source:
+                    continue
+                raw = source[site_key]
+                if bot_key == "bg" and image_url(raw):
+                    base["bgImage"] = image_url(raw)
+                    continue
+                if bot_key == "panel" and image_url(raw):
+                    base["panelImage"] = image_url(raw)
+                    continue
+                base[bot_key] = normalize_color(raw, base[bot_key])
             if "panel" not in source:
                 base["panel"] = base["bg"]
         try:
@@ -120,6 +146,7 @@ def to_theme(style):
         base["radius"] = max(0, min(28, radius))
         base["shadow"] = style.get("shadow") is not False
         result[mode] = fix_contrast(base)
+    result["bgImage"] = image_url(style.get("bgImage"))
     return result
 
 
