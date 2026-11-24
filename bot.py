@@ -20,18 +20,24 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "spacestore-2 ptb22"
+BUILD = "spacestore-3 ptb22"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 SITE_URL = "https://hekkeyne.ru/timetable/"
 FOOTER_LINK = ("\n\n<a href=\"" + SITE_URL + "\">Полное расписание на нашем сайте</a>"
                "\n<a href=\"" + TIMETABLE_URL + "\">Полное расписание Паллада СибГУ</a>")
 KRASNOYARSK_TZ = pytz.timezone('Asia/Krasnoyarsk')
-PUBLISH_DELAY_MINUTES = 2
+PUBLISH_DELAY_MINUTES = 0
 STALE_PUBLISH_LIMIT = datetime.timedelta(hours=3)
 GROUP_PROMPT_TTL = 600
 
 PENDING_GROUP = {}
+AUTO_WAKE = None
+
+
+def wake_auto():
+    if AUTO_WAKE is not None:
+        AUTO_WAKE.set()
 
 def group_link(group_id, group_name=None):
     ours = ss.site_link(group_name) if group_name else SITE_URL
@@ -130,6 +136,7 @@ class DatabaseManager:
                 sub["chat_title"] = chat_title
             sub["updated_at"] = now_stamp()
             STORE.dirty = True
+        wake_auto()
 
     def get_subscription(self, chat_id, thread_id):
         with STORE.lock:
@@ -144,6 +151,7 @@ class DatabaseManager:
             sub["auto_enabled"] = 1 if enabled else 0
             sub["updated_at"] = now_stamp()
             STORE.dirty = True
+        wake_auto()
 
     def get_auto_subscriptions(self):
         with STORE.lock:
@@ -170,6 +178,7 @@ class DatabaseManager:
                     sub["auto_enabled"] = 1 if enabled else 0
                     sub["updated_at"] = now_stamp()
                     STORE.dirty = True
+                    wake_auto()
                     return
 
     def save_teacher(self, teacher_id, name):
@@ -1097,75 +1106,102 @@ async def send_schedule_to(bot, sub, schedule, date):
         kwargs["message_thread_id"] = sub["thread_id"]
     await bot.send_message(**kwargs)
 
-def compute_publish_time(schedule, today, now):
-    lessons = ss.lessons_for(schedule, today)
-    if not lessons:
+def publish_trigger(schedule, day):
+    end = ss.last_lesson_end_time(ss.lessons_for(schedule, day))
+    if not end:
         for i in range(1, 8):
-            prev = today - datetime.timedelta(days=i)
-            prev_lessons = ss.lessons_for(schedule, prev)
-            if prev_lessons:
-                lessons = prev_lessons
+            prev = day - datetime.timedelta(days=i)
+            prev_end = ss.last_lesson_end_time(ss.lessons_for(schedule, prev))
+            if prev_end:
+                end = prev_end
                 break
-
-    end = ss.last_lesson_end_time(lessons)
     if not end:
         return None
-
     hour, minute = end
-    trigger = (KRASNOYARSK_TZ.localize(datetime.datetime.combine(today, datetime.time(hour, minute)))
-               + datetime.timedelta(minutes=PUBLISH_DELAY_MINUTES))
-    if now >= trigger:
-        if now - trigger > STALE_PUBLISH_LIMIT:
-            return None
-        return now
-    return trigger
+    return (KRASNOYARSK_TZ.localize(datetime.datetime.combine(day, datetime.time(hour, minute)))
+            + datetime.timedelta(minutes=PUBLISH_DELAY_MINUTES))
 
-AUTO_TICK_SECONDS = 60
-
-async def schedule_auto_send(app: Application):
+async def auto_send_pass(app: Application):
     now = datetime.datetime.now(KRASNOYARSK_TZ)
     today = now.date()
     tomorrow = today + datetime.timedelta(days=1)
     manager = DatabaseManager()
     subs = manager.get_auto_subscriptions()
     if not subs:
-        return
+        return None
 
+    next_at = None
+    retry_at = None
     for sub in subs:
         schedule = get_schedule_or_none(sub["group_id"])
         if not schedule:
+            retry_at = now + datetime.timedelta(minutes=5)
             continue
-        trigger = compute_publish_time(schedule, today, now)
-        if not trigger or now < trigger:
-            continue
+
         target = tomorrow.isoformat()
-        if manager.was_sent(sub["chat_id"], sub.get("thread_id"), target):
-            continue
-        try:
-            await send_schedule_to(app.bot, sub, schedule, tomorrow)
-            manager.mark_sent(sub["chat_id"], sub.get("thread_id"), target)
-            thread_info = " (топик %s)" % sub["thread_id"] if sub.get("thread_id") else ""
-            logging.info("Автоотправка: отправлено в чат %s%s", sub["chat_id"], thread_info)
-        except Forbidden:
-            logging.warning("Автоотправка: бот заблокирован в чате %s, выключаем", sub["chat_id"])
-            manager.set_auto(sub["chat_id"], sub.get("thread_id"), False)
-        except BadRequest as e:
-            logging.warning("Автоотправка: ошибка отправки в чат %s: %s", sub["chat_id"], e)
-        except Exception as e:
-            logging.error("Автоотправка: неожиданная ошибка %s: %s", type(e).__name__, e)
-        await asyncio.sleep(1)
+        if not manager.was_sent(sub["chat_id"], sub.get("thread_id"), target):
+            trigger = publish_trigger(schedule, today)
+            if trigger and now >= trigger:
+                if now - trigger <= STALE_PUBLISH_LIMIT:
+                    try:
+                        await send_schedule_to(app.bot, sub, schedule, tomorrow)
+                        manager.mark_sent(sub["chat_id"], sub.get("thread_id"), target)
+                        thread_info = " (топик %s)" % sub["thread_id"] if sub.get("thread_id") else ""
+                        logging.info("Автоотправка: отправлено в чат %s%s", sub["chat_id"], thread_info)
+                    except Forbidden:
+                        logging.warning("Автоотправка: бот заблокирован в чате %s, выключаем", sub["chat_id"])
+                        manager.set_auto(sub["chat_id"], sub.get("thread_id"), False)
+                    except BadRequest as e:
+                        logging.warning("Автоотправка: ошибка отправки в чат %s: %s", sub["chat_id"], e)
+                        retry_at = now + datetime.timedelta(minutes=5)
+                    except Exception as e:
+                        logging.error("Автоотправка: неожиданная ошибка %s: %s", type(e).__name__, e)
+                        retry_at = now + datetime.timedelta(minutes=5)
+                    await asyncio.sleep(1)
+            elif trigger:
+                next_at = trigger if next_at is None else min(next_at, trigger)
+
+        future = publish_trigger(schedule, tomorrow)
+        if future and future > now:
+            next_at = future if next_at is None else min(next_at, future)
+
+    if retry_at:
+        next_at = retry_at if next_at is None else min(next_at, retry_at)
+    return next_at
 
 async def auto_send_loop(application: Application):
     while True:
         try:
-            await schedule_auto_send(application)
+            next_at = await auto_send_pass(application)
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logging.error(f"Ошибка в цикле автоотправки: {e}")
-        await asyncio.sleep(AUTO_TICK_SECONDS)
+            logging.error("Ошибка в цикле автоотправки: %s", e)
+            next_at = None
+
+        if next_at is None:
+            pause = 3600
+        else:
+            seconds = (next_at - datetime.datetime.now(KRASNOYARSK_TZ)).total_seconds()
+            pause = max(10, min(seconds, 43200))
+            logging.info("Автоотправка: следующая отправка в %s (через %.0f мин)",
+                         next_at.strftime("%d.%m %H:%M"), pause / 60)
+
+        try:
+            if AUTO_WAKE is None:
+                await asyncio.sleep(pause)
+            else:
+                await asyncio.wait_for(AUTO_WAKE.wait(), timeout=pause)
+        except asyncio.TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            break
+        if AUTO_WAKE is not None:
+            AUTO_WAKE.clear()
 
 async def post_init(application: Application):
+    global AUTO_WAKE
+    AUTO_WAKE = asyncio.Event()
     asyncio.create_task(auto_send_loop(application))
     logging.info("Циклы автоотправки запущены")
     threading.Thread(target=warm_up, daemon=True).start()
