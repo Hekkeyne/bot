@@ -20,7 +20,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "spacestore-1 ptb22"
+BUILD = "spacestore-2 ptb22"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 SITE_URL = "https://hekkeyne.ru/timetable/"
@@ -437,6 +437,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Автоотправка:</b>\n"
         "/setchat - публиковать расписание в этот чат после последней пары\n"
         "/disable_auto - выключить здесь или по номеру: /disable_auto 2\n"
+        "/sendnow N - принудительно отправить по номеру из /autosends\n"
         + FOOTER_LINK
     )
     msg = await update.message.reply_text(text, parse_mode='HTML')
@@ -821,6 +822,59 @@ async def sendall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manager.save_message(update.effective_chat.id, user_id, msg.message_id)
 
 @with_cleanup
+async def sendnow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    manager = DatabaseManager()
+    user_id = update.effective_user.id
+    args = list(context.args)
+    if not args or not args[0].isdigit():
+        msg = await update.message.reply_text(
+            "Принудительная отправка по номеру из <code>/autosends</code>:\n"
+            "<code>/sendnow 1</code> - расписание на завтра\n"
+            "<code>/sendnow 1 today</code> - на сегодня" + FOOTER_LINK,
+            parse_mode='HTML')
+        manager.save_message(update.effective_chat.id, user_id, msg.message_id)
+        return
+
+    sub = manager.get_subscription_by_id(int(args[0]))
+    if not sub or sub.get("created_by") != user_id:
+        msg = await update.message.reply_text(
+            "Автоотправка с таким номером не найдена.\n"
+            "Список: <code>/autosends</code>" + FOOTER_LINK, parse_mode='HTML')
+        manager.save_message(update.effective_chat.id, user_id, msg.message_id)
+        return
+
+    if not sub.get("group_id"):
+        await reply_plain(update, manager, "У этой автоотправки не задана группа.")
+        return
+
+    mode = args[1].lower() if len(args) > 1 else "tomorrow"
+    days = 0 if mode in ("today", "сегодня") else 1
+    target = kras_today() + datetime.timedelta(days=days)
+
+    schedule = get_schedule_or_none(sub["group_id"])
+    if not schedule:
+        await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже.")
+        return
+
+    try:
+        await send_schedule_to(context.bot, sub, schedule, target)
+    except Forbidden:
+        await reply_plain(update, manager, "Бот заблокирован в том чате, отправить нельзя.")
+        return
+    except BadRequest as error:
+        await reply_plain(update, manager, "Ошибка отправки: " + esc(error))
+        return
+    except Exception as error:
+        await reply_plain(update, manager, "Ошибка отправки: " + esc(type(error).__name__ + ": " + str(error)))
+        return
+
+    thread_info = " (топик %s)" % sub["thread_id"] if sub.get("thread_id") else ""
+    await reply_plain(update, manager,
+                      "Отправлено в чат %s%s за %s.\nГруппа: %s" % (
+                          sub["chat_id"], thread_info, target.strftime("%d.%m.%Y"),
+                          esc(sub.get("group_name") or "")))
+
+@with_cleanup
 async def exams_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manager = DatabaseManager()
     chosen = await group_by_query(update, " ".join(context.args))
@@ -1066,7 +1120,7 @@ def compute_publish_time(schedule, today, now):
         return now
     return trigger
 
-AUTO_TICK_SECONDS = 300
+AUTO_TICK_SECONDS = 60
 
 async def schedule_auto_send(app: Application):
     now = datetime.datetime.now(KRASNOYARSK_TZ)
@@ -1254,6 +1308,7 @@ def main():
 
     app.add_handler(CommandHandler("sendtext", sendtext_cmd))
     app.add_handler(CommandHandler("sendall", sendall_cmd))
+    app.add_handler(CommandHandler(["sendnow", "testsend"], sendnow_cmd))
 
     app.add_handler(CommandHandler("exams", exams_cmd))
     app.add_handler(CommandHandler("nearexam", nearexam_cmd))
