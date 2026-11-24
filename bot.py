@@ -1,4 +1,3 @@
-import sqlite3
 import datetime
 import logging
 import asyncio
@@ -13,6 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, Forbidden
 import pytz
 
+import storage
 import schedule_source as ss
 import widget as wg
 
@@ -20,19 +20,16 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "buttons-2 ptb22"
+BUILD = "spacestore-1 ptb22"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 SITE_URL = "https://hekkeyne.ru/timetable/"
 FOOTER_LINK = ("\n\n<a href=\"" + SITE_URL + "\">Полное расписание на нашем сайте</a>"
                "\n<a href=\"" + TIMETABLE_URL + "\">Полное расписание Паллада СибГУ</a>")
 KRASNOYARSK_TZ = pytz.timezone('Asia/Krasnoyarsk')
-DB_PATH = os.getenv("DB_PATH") or "schedule_bot.db"
 PUBLISH_DELAY_MINUTES = 2
 STALE_PUBLISH_LIMIT = datetime.timedelta(hours=3)
 GROUP_PROMPT_TTL = 600
-LEGACY_GROUP_ID = 13922
-LEGACY_GROUP_NAME = "БПА24-01"
 
 PENDING_GROUP = {}
 
@@ -81,189 +78,127 @@ def dest_key(update):
         thread_id = message.message_thread_id or 0
     return chat_id, thread_id
 
+STORE = storage.StateStore()
+
+
+def now_stamp():
+    return datetime.datetime.now(KRASNOYARSK_TZ).isoformat()
+
+
+def send_key(chat_id, thread_id, day):
+    return "%s:%s:%s" % (chat_id, thread_id or 0, day)
+
+
 class DatabaseManager:
     def __init__(self):
-        self.init_db()
-        self.migrate_schema()
-        self.migrate_legacy_settings()
-
-    def migrate_schema(self):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            columns = {row["name"] for row in conn.execute("PRAGMA table_info(subscriptions)")}
-            if "id" in columns:
-                if "chat_title" not in columns:
-                    conn.execute("ALTER TABLE subscriptions ADD COLUMN chat_title TEXT")
-                return
-
-            conn.execute("ALTER TABLE subscriptions RENAME TO subscriptions_old")
-            conn.execute('''
-                CREATE TABLE subscriptions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id INTEGER NOT NULL,
-                    thread_id INTEGER NOT NULL DEFAULT 0,
-                    chat_title TEXT,
-                    group_id INTEGER,
-                    group_name TEXT,
-                    auto_enabled INTEGER DEFAULT 0,
-                    created_by INTEGER,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE (chat_id, thread_id)
-                )
-            ''')
-            conn.execute('''
-                INSERT INTO subscriptions
-                    (chat_id, thread_id, chat_title, group_id, group_name, auto_enabled, created_by, updated_at)
-                SELECT chat_id, thread_id, NULL, group_id, group_name, auto_enabled, created_by, updated_at
-                FROM subscriptions_old
-            ''')
-            conn.execute("DROP TABLE subscriptions_old")
-            logging.info("Таблица subscriptions перестроена с номерами")
-
-    def init_db(self):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS bot_messages (
-                    id INTEGER PRIMARY KEY,
-                    chat_id INTEGER,
-                    user_id INTEGER,
-                    message_id INTEGER,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS user_settings (
-                    user_id INTEGER PRIMARY KEY,
-                    auto_chat_id INTEGER,
-                    message_thread_id INTEGER,
-                    auto_enabled BOOLEAN DEFAULT 1,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS subscriptions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id INTEGER NOT NULL,
-                    thread_id INTEGER NOT NULL DEFAULT 0,
-                    chat_title TEXT,
-                    group_id INTEGER,
-                    group_name TEXT,
-                    auto_enabled INTEGER DEFAULT 0,
-                    created_by INTEGER,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE (chat_id, thread_id)
-                )
-            ''')
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS teacher_links (
-                    id INTEGER PRIMARY KEY,
-                    name TEXT
-                )
-            ''')
+        STORE.ensure_loaded()
 
     def save_message(self, chat_id, user_id, message_id):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute('DELETE FROM bot_messages WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
-            conn.execute('INSERT INTO bot_messages (chat_id, user_id, message_id) VALUES (?, ?, ?)',
-                         (chat_id, user_id, message_id))
+        with STORE.lock:
+            messages = STORE.data["messages"]
+            messages["%s:%s" % (chat_id, user_id)] = message_id
+            extra = len(messages) - 2000
+            if extra > 0:
+                for key in list(messages.keys())[:extra]:
+                    messages.pop(key, None)
+            STORE.dirty = True
 
     def get_last_message(self, chat_id, user_id):
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.execute(
-                'SELECT message_id FROM bot_messages WHERE chat_id = ? AND user_id = ? ORDER BY timestamp DESC LIMIT 1',
-                (chat_id, user_id)
-            )
-            row = cur.fetchone()
-            return row[0] if row else None
+        with STORE.lock:
+            return STORE.data["messages"].get("%s:%s" % (chat_id, user_id))
+
+    def _find_sub(self, chat_id, thread_id):
+        for sub in STORE.data["subscriptions"]:
+            if int(sub.get("chat_id") or 0) == int(chat_id) and int(sub.get("thread_id") or 0) == int(thread_id or 0):
+                return sub
+        return None
 
     def set_group(self, chat_id, thread_id, group_id, group_name, user_id=None, chat_title=None):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                'INSERT OR IGNORE INTO subscriptions (chat_id, thread_id, chat_title, group_id, group_name, created_by) '
-                'VALUES (?, ?, ?, ?, ?, ?)',
-                (chat_id, thread_id, chat_title, group_id, group_name, user_id)
-            )
-            conn.execute(
-                'UPDATE subscriptions SET group_id = ?, group_name = ?, created_by = ?, '
-                'chat_title = COALESCE(?, chat_title), updated_at = CURRENT_TIMESTAMP '
-                'WHERE chat_id = ? AND thread_id = ?',
-                (group_id, group_name, user_id, chat_title, chat_id, thread_id)
-            )
+        with STORE.lock:
+            sub = self._find_sub(chat_id, thread_id)
+            if sub is None:
+                sub = {"id": STORE.data["next_sub_id"], "chat_id": chat_id, "thread_id": thread_id or 0,
+                       "chat_title": chat_title, "group_id": None, "group_name": None,
+                       "auto_enabled": 0, "created_by": user_id, "updated_at": now_stamp()}
+                STORE.data["next_sub_id"] += 1
+                STORE.data["subscriptions"].append(sub)
+            sub["group_id"] = group_id
+            sub["group_name"] = group_name
+            if user_id is not None:
+                sub["created_by"] = user_id
+            if chat_title:
+                sub["chat_title"] = chat_title
+            sub["updated_at"] = now_stamp()
+            STORE.dirty = True
 
     def get_subscription(self, chat_id, thread_id):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.execute(
-                'SELECT * FROM subscriptions WHERE chat_id = ? AND thread_id = ?',
-                (chat_id, thread_id)
-            )
-            row = cur.fetchone()
-            return dict(row) if row else None
+        with STORE.lock:
+            sub = self._find_sub(chat_id, thread_id)
+            return dict(sub) if sub else None
 
     def set_auto(self, chat_id, thread_id, enabled):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                'UPDATE subscriptions SET auto_enabled = ?, updated_at = CURRENT_TIMESTAMP '
-                'WHERE chat_id = ? AND thread_id = ?',
-                (1 if enabled else 0, chat_id, thread_id)
-            )
+        with STORE.lock:
+            sub = self._find_sub(chat_id, thread_id)
+            if sub is None:
+                return
+            sub["auto_enabled"] = 1 if enabled else 0
+            sub["updated_at"] = now_stamp()
+            STORE.dirty = True
 
     def get_auto_subscriptions(self):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.execute(
-                'SELECT * FROM subscriptions WHERE auto_enabled = 1 AND group_id IS NOT NULL'
-            )
-            return [dict(row) for row in cur.fetchall()]
+        with STORE.lock:
+            return [dict(sub) for sub in STORE.data["subscriptions"]
+                    if sub.get("auto_enabled") and sub.get("group_id")]
 
     def get_subscriptions_by(self, user_id):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.execute('SELECT * FROM subscriptions WHERE created_by = ? ORDER BY id', (user_id,))
-            return [dict(row) for row in cur.fetchall()]
+        with STORE.lock:
+            items = [sub for sub in STORE.data["subscriptions"] if sub.get("created_by") == user_id]
+            items.sort(key=lambda sub: int(sub.get("id") or 0))
+            return [dict(sub) for sub in items]
 
     def get_subscription_by_id(self, sub_id):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute('SELECT * FROM subscriptions WHERE id = ?', (sub_id,)).fetchone()
-            return dict(row) if row else None
+        with STORE.lock:
+            for sub in STORE.data["subscriptions"]:
+                if int(sub.get("id") or 0) == int(sub_id):
+                    return dict(sub)
+        return None
 
     def set_auto_by_id(self, sub_id, enabled):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                'UPDATE subscriptions SET auto_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-                (1 if enabled else 0, sub_id)
-            )
+        with STORE.lock:
+            for sub in STORE.data["subscriptions"]:
+                if int(sub.get("id") or 0) == int(sub_id):
+                    sub["auto_enabled"] = 1 if enabled else 0
+                    sub["updated_at"] = now_stamp()
+                    STORE.dirty = True
+                    return
 
     def save_teacher(self, teacher_id, name):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute('INSERT OR REPLACE INTO teacher_links (id, name) VALUES (?, ?)',
-                         (teacher_id, name))
-            conn.execute('DELETE FROM teacher_links WHERE id NOT IN '
-                         '(SELECT id FROM teacher_links ORDER BY rowid DESC LIMIT 500)')
+        with STORE.lock:
+            teachers = STORE.data["teachers"]
+            teachers[str(teacher_id)] = name
+            extra = len(teachers) - 500
+            if extra > 0:
+                for key in list(teachers.keys())[:extra]:
+                    teachers.pop(key, None)
+            STORE.dirty = True
 
     def get_teacher(self, teacher_id):
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute('SELECT name FROM teacher_links WHERE id = ?', (teacher_id,)).fetchone()
-            return row[0] if row else None
+        with STORE.lock:
+            return STORE.data["teachers"].get(str(teacher_id))
 
-    def migrate_legacy_settings(self):
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            if conn.execute('SELECT COUNT(*) FROM subscriptions').fetchone()[0]:
-                return
-            legacy = conn.execute(
-                'SELECT user_id, auto_chat_id, message_thread_id, auto_enabled '
-                'FROM user_settings WHERE auto_chat_id IS NOT NULL'
-            ).fetchall()
+    def was_sent(self, chat_id, thread_id, day):
+        with STORE.lock:
+            return send_key(chat_id, thread_id, day) in STORE.data["sent"]
 
-        for row in legacy:
-            thread_id = row['message_thread_id'] or 0
-            self.set_group(row['auto_chat_id'], thread_id,
-                           LEGACY_GROUP_ID, LEGACY_GROUP_NAME, row['user_id'])
-            if row['auto_enabled']:
-                self.set_auto(row['auto_chat_id'], thread_id, True)
-            logging.info("Перенесена старая настройка: чат %s, топик %s", row['auto_chat_id'], thread_id)
+    def mark_sent(self, chat_id, thread_id, day):
+        with STORE.lock:
+            sent = STORE.data["sent"]
+            sent[send_key(chat_id, thread_id, day)] = now_stamp()
+            extra = len(sent) - 1000
+            if extra > 0:
+                for key in list(sent.keys())[:extra]:
+                    sent.pop(key, None)
+            STORE.dirty = True
 
 def kras_today():
     return datetime.datetime.now(KRASNOYARSK_TZ).date()
@@ -1131,6 +1066,8 @@ def compute_publish_time(schedule, today, now):
         return now
     return trigger
 
+AUTO_TICK_SECONDS = 300
+
 async def schedule_auto_send(app: Application):
     now = datetime.datetime.now(KRASNOYARSK_TZ)
     today = now.date()
@@ -1138,50 +1075,31 @@ async def schedule_auto_send(app: Application):
     manager = DatabaseManager()
     subs = manager.get_auto_subscriptions()
     if not subs:
-        logging.info("Автоотправка: нет активных подписок")
         return
 
-    jobs = []
     for sub in subs:
         schedule = get_schedule_or_none(sub["group_id"])
         if not schedule:
             continue
         trigger = compute_publish_time(schedule, today, now)
-        if not trigger:
-            logging.info("Автоотправка: чат %s пропущен, время уже прошло", sub["chat_id"])
+        if not trigger or now < trigger:
             continue
-        jobs.append((trigger, sub, schedule))
-    jobs.sort(key=lambda job: job[0])
-
-    sent_count = 0
-    for trigger, sub, schedule in jobs:
-        current = datetime.datetime.now(KRASNOYARSK_TZ)
-        if current < trigger:
-            wait = (trigger - current).total_seconds()
-            logging.info("Автоотправка: чат %s - через %.1f мин (в %s)",
-                         sub["chat_id"], wait / 60, trigger.strftime("%H:%M"))
-            await asyncio.sleep(wait)
-
-        if datetime.datetime.now(KRASNOYARSK_TZ).date() != today:
-            logging.warning("Автоотправка: дата сменилась, прерываем")
-            return
-
+        target = tomorrow.isoformat()
+        if manager.was_sent(sub["chat_id"], sub.get("thread_id"), target):
+            continue
         try:
             await send_schedule_to(app.bot, sub, schedule, tomorrow)
+            manager.mark_sent(sub["chat_id"], sub.get("thread_id"), target)
             thread_info = " (топик %s)" % sub["thread_id"] if sub.get("thread_id") else ""
             logging.info("Автоотправка: отправлено в чат %s%s", sub["chat_id"], thread_info)
-            sent_count += 1
         except Forbidden:
             logging.warning("Автоотправка: бот заблокирован в чате %s, выключаем", sub["chat_id"])
-            manager.set_auto(sub["chat_id"], sub["thread_id"], False)
+            manager.set_auto(sub["chat_id"], sub.get("thread_id"), False)
         except BadRequest as e:
             logging.warning("Автоотправка: ошибка отправки в чат %s: %s", sub["chat_id"], e)
         except Exception as e:
             logging.error("Автоотправка: неожиданная ошибка %s: %s", type(e).__name__, e)
         await asyncio.sleep(1)
-
-    if sent_count:
-        logging.info("Автоотправка: всего отправлено %d", sent_count)
 
 async def auto_send_loop(application: Application):
     while True:
@@ -1191,15 +1109,7 @@ async def auto_send_loop(application: Application):
             break
         except Exception as e:
             logging.error(f"Ошибка в цикле автоотправки: {e}")
-
-        now = datetime.datetime.now(KRASNOYARSK_TZ)
-        next_day = now.date() + datetime.timedelta(days=1)
-        next_check = KRASNOYARSK_TZ.localize(
-            datetime.datetime.combine(next_day, datetime.time(0, 1))
-        )
-        sleep_seconds = (next_check - datetime.datetime.now(KRASNOYARSK_TZ)).total_seconds()
-        logging.info(f"Следующая проверка через {sleep_seconds/3600:.1f} часов")
-        await asyncio.sleep(max(60, sleep_seconds))
+        await asyncio.sleep(AUTO_TICK_SECONDS)
 
 async def post_init(application: Application):
     asyncio.create_task(auto_send_loop(application))

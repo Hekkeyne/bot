@@ -803,6 +803,15 @@ function warm_teachers(array $pending): void
     }
 }
 
+function state_token(): string
+{
+    $file = __DIR__ . '/cache/state.key';
+    if (!is_file($file)) {
+        return '';
+    }
+    return trim((string) file_get_contents($file));
+}
+
 $action = (string) ($_GET['action'] ?? '');
 
 if (TOKEN !== '' && (string) ($_GET['token'] ?? '') !== TOKEN) {
@@ -1142,6 +1151,51 @@ try {
         $items = site_search((string) ($_GET['q'] ?? ''));
         $body = json_encode($items, JSON_UNESCAPED_UNICODE);
         send(200, $body === false ? '[]' : $body, 'application/json; charset=utf-8');
+    }
+
+    if ($action === 'state') {
+        $expected = state_token();
+        $given = (string) ($_SERVER['HTTP_X_STATE_TOKEN'] ?? '');
+        if ($expected === '' || !hash_equals($expected, $given)) {
+            fail('неверный токен', 403);
+        }
+
+        $path = __DIR__ . '/cache/state.json';
+        $dir = dirname($path);
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0755, true);
+        }
+
+        if ((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST') {
+            $raw = file_get_contents('php://input');
+            $data = json_decode((string) $raw, true);
+            if (!is_array($data)) {
+                fail('нужен JSON-объект', 400);
+            }
+            $handle = @fopen($path, 'c+');
+            if ($handle === false) {
+                fail('хранилище недоступно', 500);
+            }
+            flock($handle, LOCK_EX);
+            ftruncate($handle, 0);
+            rewind($handle);
+            fwrite($handle, (string) json_encode($data, JSON_UNESCAPED_UNICODE));
+            fflush($handle);
+            flock($handle, LOCK_UN);
+            fclose($handle);
+            send(200, '{"ok":true}', 'application/json; charset=utf-8');
+        }
+
+        $handle = @fopen($path, 'c+');
+        if ($handle === false) {
+            send(200, '{}', 'application/json; charset=utf-8');
+        }
+        flock($handle, LOCK_SH);
+        $raw = stream_get_contents($handle);
+        flock($handle, LOCK_UN);
+        fclose($handle);
+        $raw = trim((string) $raw);
+        send(200, $raw === '' ? '{}' : $raw, 'application/json; charset=utf-8');
     }
 
     fail('неизвестное действие', 400);
