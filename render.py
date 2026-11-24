@@ -48,13 +48,63 @@ THEMES = {
 
 THEME_ORDER = ["default", "mono", "pink", "mint", "lavender", "neon", "terminal"]
 
+DARK_THEMES = {
+    "default": {
+        "bg": "#17191d", "panel": "#17191d", "ink": "#e7e9ee", "muted": "#9aa2ad",
+        "line": "#2b2f36", "edge": "#0d0f13", "outline": "#9aa2ad", "on_ink": "#14161a",
+        "building": "#2dd4bf", "cabinet": "#a78bfa", "today": "#8b5cf6"
+    },
+    "mono": {
+        "bg": "#111111", "panel": "#181818", "ink": "#f4f4f5", "muted": "#a1a1aa",
+        "line": "#2e2e2e", "edge": "#000000", "outline": "#d4d4d8", "on_ink": "#111111",
+        "building": "#d4d4d8", "cabinet": "#d4d4d8", "today": "#d4d4d8"
+    },
+    "pink": {
+        "bg": "#1d1017", "panel": "#24131d", "ink": "#fbe7f2", "muted": "#c78fa8",
+        "line": "#402231", "edge": "#120a0f", "outline": "#f9a8d4", "on_ink": "#1d1017",
+        "building": "#f9a8d4", "cabinet": "#e879f9", "today": "#f472b6"
+    },
+    "mint": {
+        "bg": "#0e1513", "panel": "#151f1c", "ink": "#e6f7f0", "muted": "#8fb3a8",
+        "line": "#24352f", "edge": "#08100d", "outline": "#6ee7b7", "on_ink": "#0e1513",
+        "building": "#2dd4bf", "cabinet": "#22d3ee", "today": "#2dd4bf"
+    },
+    "lavender": {
+        "bg": "#120f19", "panel": "#1a1526", "ink": "#f1eaff", "muted": "#a89cc4",
+        "line": "#2f2743", "edge": "#0b0911", "outline": "#c4b5fd", "on_ink": "#120f19",
+        "building": "#c4b5fd", "cabinet": "#e879f9", "today": "#a78bfa"
+    },
+    "neon": {
+        "bg": "#07070d", "panel": "#0d0d17", "ink": "#e7e9ff", "muted": "#8b8bb5",
+        "line": "#1e1e33", "edge": "#030306", "outline": "#a3e635", "on_ink": "#07070d",
+        "building": "#a3e635", "cabinet": "#e879f9", "today": "#a3e635"
+    },
+    "terminal": {
+        "bg": "#000000", "panel": "#070b07", "ink": "#d8f5dd", "muted": "#5f9a5f",
+        "line": "#122012", "edge": "#000000", "outline": "#4ade80", "on_ink": "#000000",
+        "building": "#4ade80", "cabinet": "#86efac", "today": "#22c55e", "shadow": False
+    }
+}
 
-def theme(name):
-    return THEMES.get(name) or THEMES["default"]
+
+def theme(name, mode="light", custom=None):
+    if name == "custom" and isinstance(custom, dict):
+        base = dict(DEFAULT)
+        if mode == "dark":
+            base.update(DARK_THEMES["default"])
+        base.update(custom.get(mode) or {})
+        base["label"] = custom.get("label") or "Своя"
+        return base
+    base = dict(THEMES.get(name) or THEMES["default"])
+    if mode == "dark":
+        base.update(DARK_THEMES.get(name) or DARK_THEMES["default"])
+    return base
 
 
-def theme_label(name):
-    return theme(name)["label"]
+def theme_label(name, custom=None):
+    if name == "custom" and isinstance(custom, dict):
+        return custom.get("label") or "Своя"
+    return THEMES.get(name, THEMES["default"])["label"]
 
 
 @lru_cache(maxsize=64)
@@ -177,8 +227,8 @@ def qr_url(sub):
     return ss.site_link(group) if group else ss.SITE_URL
 
 
-def render_day(schedule, sub, date, theme_key="default", today=None):
-    th = theme(theme_key)
+def render_day(schedule, sub, date, theme_key="default", today=None, mode="light", custom=None):
+    th = theme(theme_key, mode, custom)
     width = 1800
     pad = 60
     inner = width - pad * 2
@@ -267,8 +317,8 @@ def render_day(schedule, sub, date, theme_key="default", today=None):
     return output.getvalue()
 
 
-def render_week(schedule, sub, monday, theme_key="default"):
-    th = theme(theme_key)
+def render_week(schedule, sub, monday, theme_key="default", mode="light", custom=None):
+    th = theme(theme_key, mode, custom)
     width = 3000
     pad = 96
     gap = 32

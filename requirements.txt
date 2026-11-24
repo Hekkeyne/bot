@@ -4,3 +4,4 @@ pytz
 python-dotenv
 Pillow
 qrcode[pil]
+opencv-python-headless>=4.8,<5
