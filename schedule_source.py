@@ -161,6 +161,7 @@ def _normalize(payload):
     ref = payload.get("ref") or {}
 
     return {
+        "kind": payload.get("kind") or "group",
         "group_id": group.get("id"),
         "group_name": _clean(group.get("name")),
         "semester": _clean(payload.get("semester")),
@@ -168,15 +169,20 @@ def _normalize(payload):
         "ref_week": ref.get("week"),
         "weeks": weeks,
         "exams": exams,
+        "consultations": payload.get("consultations") or [],
         "cached": bool(payload.get("cached")),
     }
 
 
-def _load(group_id=None, name=None):
+def _load(group_id=None, name=None, kind="group"):
     if not group_id and not name:
         raise ScheduleError("Нужен id или название группы")
 
-    params = {"id": group_id} if group_id else {"q": name}
+    params = {"kind": kind}
+    if group_id:
+        params["id"] = group_id
+    else:
+        params["q"] = name
     return _normalize(_get("json", **params))
 
 
@@ -210,6 +216,16 @@ def get_schedule(group_id, force=False, ttl=CACHE_TTL):
 def get_schedule_by_name(name, force=False, ttl=CACHE_TTL):
     key = ("name", _clean(name).lower())
     return _cached(key, lambda: _load(name=name), force, ttl)
+
+
+def get_teacher_schedule(name, force=False, ttl=CACHE_TTL):
+    key = ("teacher", _clean(name).lower())
+    return _cached(key, lambda: _load(name=name, kind="professor"), force, ttl)
+
+
+def get_consultations(group_id):
+    body = _get("consultations", id=group_id)
+    return body.get("consultations") or []
 
 
 def week_number_for(date, schedule):

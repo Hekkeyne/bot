@@ -157,6 +157,21 @@ function clean_text(string $value): string
     return trim($collapsed === null ? $value : $collapsed);
 }
 
+function normalize_query(string $query): string
+{
+    $compact = preg_replace('/\s+/u', '', trim($query));
+    if ($compact === null || $compact === '' || !preg_match('/\d/', $compact)) {
+        return $query;
+    }
+    if (!preg_match('/^[\dA-Za-zА-Яа-яЁё-]+$/u', $compact)) {
+        return $query;
+    }
+    if (preg_match('/^([A-Za-zА-Яа-яЁё]+)(\d{2})(\d{2})$/', $compact, $match)) {
+        return $match[1] . $match[2] . '-' . $match[3];
+    }
+    return $compact;
+}
+
 function cls(string $name): string
 {
     return "contains(concat(' ', normalize-space(@class), ' '), ' " . $name . " ')";
@@ -179,16 +194,16 @@ function parse_lesson(DOMElement $ul): array
         }
     }
 
-    foreach ($xpath->query(".//li[.//i[" . cls('fa-user') . "]]//a", $ul) as $link) {
+    foreach ($xpath->query(".//li[.//i[" . cls('fa-user') . " or " . cls('fa-group') . "]]//a", $ul) as $link) {
         $name = clean_text($link->textContent);
         if ($name === '') {
             continue;
         }
-        $teacherId = null;
-        if (preg_match('#/timetable/professor/(\d+)#', $link->getAttribute('href'), $match)) {
-            $teacherId = (int) $match[1];
+        $linkId = null;
+        if (preg_match('#/timetable/(?:professor|group)/(\d+)#', $link->getAttribute('href'), $match)) {
+            $linkId = (int) $match[1];
         }
-        $teachers[] = ['name' => $name, 'id' => $teacherId];
+        $teachers[] = ['name' => $name, 'id' => $linkId];
     }
 
     $roomNode = $xpath->query(".//li[.//i[" . cls('fa-compass') . "]]//a", $ul)->item(0);
@@ -219,13 +234,215 @@ function parse_lesson(DOMElement $ul): array
     ];
 }
 
-function parse_schedule(string $html): array
+function parse_dated(DOMXPath $xpath, string $tabId): array
+{
+    $items = [];
+    $panel = $xpath->query("//div[@id='" . $tabId . "']")->item(0);
+    if (!$panel) {
+        return $items;
+    }
+    foreach ($xpath->query(".//div[" . cls('day') . "]", $panel) as $day) {
+        $header = $xpath->query(".//div[contains(@class,'header')]", $day)->item(0);
+        $headerText = $header ? clean_text($header->textContent) : '';
+        if (!preg_match('/(\d{2}\.\d{2}\.\d{4})/u', $headerText, $match)) {
+            continue;
+        }
+        $date = $match[1];
+
+        foreach ($xpath->query(".//div[" . cls('body') . "]//div[" . cls('line') . "]", $day) as $line) {
+            $timeNode = $xpath->query(".//div[" . cls('time') . "]", $line)->item(0);
+            $timeText = $timeNode ? clean_text($timeNode->textContent) : '';
+            $time = '';
+            if (preg_match('/\d{1,2}:\d{2}/u', $timeText, $match)) {
+                $time = $match[0];
+            }
+            foreach ($xpath->query(".//ul[" . cls('list-unstyled') . "]", $line) as $ul) {
+                $lesson = parse_lesson($ul);
+                if ($lesson['subject'] === '') {
+                    continue;
+                }
+                $items[] = [
+                    'date' => $date,
+                    'time' => $time,
+                    'subject' => $lesson['subject'],
+                    'type' => $lesson['type'],
+                    'teacher' => $lesson['teacher'],
+                    'teachers' => $lesson['teachers'],
+                    'room' => $lesson['room'],
+                ];
+            }
+        }
+    }
+    return $items;
+}
+
+function parse_document(string $html): DOMXPath
 {
     $document = new DOMDocument();
     libxml_use_internal_errors(true);
     $document->loadHTML('<?xml encoding="utf-8" ?>' . $html);
     libxml_clear_errors();
-    $xpath = new DOMXPath($document);
+    return new DOMXPath($document);
+}
+
+function parse_consultation_weeks(DOMXPath $xpath, ?string $refDate, ?int $refWeek): array
+{
+    $items = [];
+    $panel = $xpath->query("//div[@id='consultation_tab']")->item(0);
+    if (!$panel) {
+        return $items;
+    }
+
+    $monday = null;
+    if ($refDate) {
+        $parsed = DateTime::createFromFormat('Y-m-d', $refDate);
+        if ($parsed) {
+            $parsed->modify('-' . ((int) $parsed->format('N') - 1) . ' days');
+            $monday = $parsed;
+        }
+    }
+
+    foreach ($xpath->query(".//div[starts-with(@id,'cs_week_') and contains(@id,'_tab')]", $panel) as $weekPanel) {
+        if (!preg_match('/^cs_week_(\d+)_tab$/', $weekPanel->getAttribute('id'), $match)) {
+            continue;
+        }
+        $weekNo = (int) $match[1];
+
+        foreach ($xpath->query(".//div[" . cls('day') . "]", $weekPanel) as $day) {
+            $classes = preg_split('/\s+/', $day->getAttribute('class'), -1, PREG_SPLIT_NO_EMPTY);
+            $weekdayIndex = null;
+            foreach (WEEKDAYS as $index => $candidate) {
+                if (in_array($candidate, $classes, true)) {
+                    $weekdayIndex = $index;
+                    break;
+                }
+            }
+            if ($weekdayIndex === null) {
+                continue;
+            }
+
+            $date = '';
+            if ($monday !== null && $refWeek !== null) {
+                $moment = clone $monday;
+                $moment->modify((($weekNo - $refWeek) * 7 + $weekdayIndex) . ' days');
+                $date = $moment->format('d.m.Y');
+            }
+
+            foreach ($xpath->query(".//div[" . cls('body') . "]//div[" . cls('line') . "]", $day) as $line) {
+                $timeNode = $xpath->query(".//div[" . cls('time') . "]", $line)->item(0);
+                $timeText = $timeNode ? clean_text($timeNode->textContent) : '';
+                $time = '';
+                if (preg_match('/\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}/u', $timeText, $match)) {
+                    $time = str_replace(' ', '', $match[0]);
+                } elseif (preg_match('/\d{1,2}:\d{2}/u', $timeText, $match)) {
+                    $time = $match[0];
+                }
+
+                $subject = '';
+                $nameNode = $xpath->query(".//span[" . cls('name') . "]", $line)->item(0);
+                if ($nameNode) {
+                    $subject = clean_text($nameNode->textContent);
+                }
+
+                $roomNode = $xpath->query(".//li[.//i[" . cls('fa-compass') . "]]//a", $line)->item(0);
+                $room = $roomNode ? clean_text($roomNode->textContent) : '';
+
+                $names = [];
+                foreach ($xpath->query(".//li[.//i[" . cls('fa-user') . " or " . cls('fa-group') . "]]//a", $line) as $link) {
+                    $label = clean_text($link->textContent);
+                    if ($label !== '') {
+                        $names[] = $label;
+                    }
+                }
+
+                if ($time === '' && $room === '' && $subject === '') {
+                    continue;
+                }
+
+                $items[] = [
+                    'date' => $date,
+                    'time' => $time,
+                    'subject' => $subject === '' ? 'Консультация' : $subject,
+                    'type' => $subject === '' ? '' : 'Консультация',
+                    'teacher' => implode(', ', $names),
+                    'teachers' => [],
+                    'room' => $room,
+                    'weekday' => WEEKDAYS[$weekdayIndex],
+                    'week' => $weekNo,
+                ];
+            }
+        }
+    }
+
+    return $items;
+}
+
+function parse_consultations(string $html): array
+{
+    $xpath = parse_document($html);
+
+    $refDate = null;
+    $refWeek = null;
+    $subtitle = $xpath->query("//h4[" . cls('bold') . "]")->item(0);
+    if ($subtitle) {
+        $raw = clean_text($subtitle->textContent);
+        if (preg_match('/(\d{2}\.\d{2}\.\d{4})\s*-\s*(\d+)\s*недел/u', $raw, $match)) {
+            $parsed = DateTime::createFromFormat('d.m.Y', $match[1]);
+            $refDate = $parsed ? $parsed->format('Y-m-d') : null;
+            $refWeek = (int) $match[2];
+        }
+    }
+
+    return parse_consultation_weeks($xpath, $refDate, $refWeek);
+}
+
+function request_many(array $urls, int $limit = 8, int $timeout = 20): array
+{
+    $results = [];
+    $keys = array_keys($urls);
+    $total = count($keys);
+
+    for ($offset = 0; $offset < $total; $offset += $limit) {
+        $batch = array_slice($keys, $offset, $limit);
+        $multi = curl_multi_init();
+        $handles = [];
+        foreach ($batch as $key) {
+            $handle = curl_init($urls[$key]);
+            curl_setopt_array($handle, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_CONNECTTIMEOUT => $timeout,
+                CURLOPT_TIMEOUT => $timeout,
+                CURLOPT_USERAGENT => UA,
+                CURLOPT_SSL_VERIFYPEER => true,
+            ]);
+            curl_multi_add_handle($multi, $handle);
+            $handles[$key] = $handle;
+        }
+
+        $running = null;
+        do {
+            curl_multi_exec($multi, $running);
+            if ($running > 0) {
+                curl_multi_select($multi, 1.0);
+            }
+        } while ($running > 0);
+
+        foreach ($handles as $key => $handle) {
+            $body = curl_multi_getcontent($handle);
+            $results[$key] = is_string($body) ? $body : '';
+            curl_multi_remove_handle($multi, $handle);
+            curl_close($handle);
+        }
+        curl_multi_close($multi);
+    }
+
+    return $results;
+}
+
+function parse_schedule(string $html, string $kind = 'group'): array
+{
+    $xpath = parse_document($html);
 
     $groupName = '';
     $semester = '';
@@ -240,6 +457,9 @@ function parse_schedule(string $html): array
         }
         if (preg_match('/(\d+\s*семестр[^(]*)/u', $raw, $match)) {
             $semester = clean_text($match[1]);
+        }
+        if ($kind === 'professor') {
+            $groupName = clean_text(preg_replace('/\s*-\s*\d{4}\s*\/\s*\d{4}.*$/u', '', $raw));
         }
     }
 
@@ -294,51 +514,66 @@ function parse_schedule(string $html): array
         $weeks[$weekNo] = $days;
     }
 
-    $exams = [];
-    $session = $xpath->query("//div[@id='session_tab']")->item(0);
-    if ($session) {
-        foreach ($xpath->query(".//div[" . cls('day') . "]", $session) as $day) {
-            $header = $xpath->query(".//div[contains(@class,'header')]", $day)->item(0);
-            $headerText = $header ? clean_text($header->textContent) : '';
-            if (!preg_match('/(\d{2}\.\d{2}\.\d{4})/u', $headerText, $match)) {
-                continue;
-            }
-            $date = $match[1];
-
-            foreach ($xpath->query(".//div[" . cls('body') . "]//div[" . cls('line') . "]", $day) as $line) {
-                $timeNode = $xpath->query(".//div[" . cls('time') . "]", $line)->item(0);
-                $timeText = $timeNode ? clean_text($timeNode->textContent) : '';
-                $time = '';
-                if (preg_match('/\d{1,2}:\d{2}/u', $timeText, $match)) {
-                    $time = $match[0];
-                }
-                foreach ($xpath->query(".//ul[" . cls('list-unstyled') . "]", $line) as $ul) {
-                    $lesson = parse_lesson($ul);
-                    if ($lesson['subject'] === '') {
-                        continue;
-                    }
-                    $exams[] = [
-                        'date' => $date,
-                        'time' => $time,
-                        'subject' => $lesson['subject'],
-                        'type' => $lesson['type'],
-                        'teacher' => $lesson['teacher'],
-                        'teachers' => $lesson['teachers'],
-                        'room' => $lesson['room'],
-                    ];
-                }
-            }
-        }
-    }
+    $exams = parse_dated($xpath, 'session_tab');
+    $consultations = parse_consultation_weeks($xpath, $refDate, $refWeek);
 
     return [
+        'kind' => $kind,
         'group' => ['name' => $groupName],
         'semester' => $semester,
         'ref' => ['date' => $refDate, 'week' => $refWeek],
         'weeks' => $weeks,
         'exams' => $exams,
+        'consultations' => $consultations,
         'updated' => date('c'),
     ];
+}
+
+function visit_stats(string $kind = '', string $name = ''): array
+{
+    $path = cache_file('visits');
+    $dir = dirname($path);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0755, true);
+    }
+
+    $empty = ['total' => 0, 'today' => 0, 'days' => [], 'kinds' => [], 'targets' => []];
+    $handle = @fopen($path, 'c+');
+    if ($handle === false) {
+        return $empty;
+    }
+
+    flock($handle, LOCK_EX);
+    $raw = stream_get_contents($handle);
+    $data = json_decode((string) $raw, true);
+    if (!is_array($data)) {
+        $data = [];
+    }
+    $data['total'] = (int) ($data['total'] ?? 0);
+    $data['days'] = is_array($data['days'] ?? null) ? $data['days'] : [];
+    $data['kinds'] = is_array($data['kinds'] ?? null) ? $data['kinds'] : [];
+    $data['targets'] = is_array($data['targets'] ?? null) ? $data['targets'] : [];
+
+    if ($kind !== '') {
+        $day = date('Y-m-d');
+        $data['total']++;
+        $data['days'][$day] = (int) ($data['days'][$day] ?? 0) + 1;
+        $data['kinds'][$kind] = (int) ($data['kinds'][$kind] ?? 0) + 1;
+        if ($name !== '') {
+            $key = $kind . '|' . $name;
+            $data['targets'][$key] = (int) ($data['targets'][$key] ?? 0) + 1;
+        }
+        rewind($handle);
+        ftruncate($handle, 0);
+        fwrite($handle, (string) json_encode($data, JSON_UNESCAPED_UNICODE));
+        fflush($handle);
+    }
+
+    flock($handle, LOCK_UN);
+    fclose($handle);
+
+    $data['today'] = (int) ($data['days'][date('Y-m-d')] ?? 0);
+    return $data;
 }
 
 function cache_file(string $key): string
@@ -579,7 +814,7 @@ try {
         $payload = file_get_contents('php://input');
         $cacheKey = null;
         if ($payload === false || $payload === '') {
-            $query = (string) ($_GET['q'] ?? '');
+            $query = normalize_query((string) ($_GET['q'] ?? ''));
             $payload = json_encode([
                 'jsonrpc' => '2.0',
                 'method' => 'call',
@@ -590,6 +825,12 @@ try {
             $cached = cache_get($cacheKey);
             if ($cached !== null && isset($cached['body'])) {
                 send(200, (string) $cached['body'], 'application/json; charset=utf-8', 'public, max-age=600');
+            }
+        } else {
+            $decoded = json_decode($payload, true);
+            if (is_array($decoded) && isset($decoded['params']['query'])) {
+                $decoded['params']['query'] = normalize_query((string) $decoded['params']['query']);
+                $payload = (string) json_encode($decoded, JSON_UNESCAPED_UNICODE);
             }
         }
         $result = request(SITE . '/ajax/search_schedule', [
@@ -631,11 +872,110 @@ try {
 
     if ($action === 'json') {
         $id = (int) ($_GET['id'] ?? 0);
-        $query = trim((string) ($_GET['q'] ?? ''));
+        $query = normalize_query(trim((string) ($_GET['q'] ?? '')));
+        $kind = ((string) ($_GET['kind'] ?? 'group')) === 'professor' ? 'professor' : 'group';
+
         if ($id <= 0) {
             if ($query === '') {
                 fail('нужен параметр id или q', 400);
             }
+            $exact = null;
+            $candidates = [];
+            foreach (site_search($query) as $item) {
+                if (mb_strtoupper($item['name']) === mb_strtoupper($query)) {
+                    $exact = $item;
+                    break;
+                }
+                $words = preg_split('/\s+/u', $item['name'], -1, PREG_SPLIT_NO_EMPTY);
+                if ($words && mb_strtoupper($words[0]) === mb_strtoupper($query)) {
+                    $candidates[] = $item;
+                }
+            }
+            if ($exact === null && count($candidates) === 1) {
+                $exact = $candidates[0];
+            }
+            if ($exact === null) {
+                if (count($candidates) > 1) {
+                    $body = json_encode(['error' => 'несколько преподавателей с такой фамилией', 'candidates' => $candidates], JSON_UNESCAPED_UNICODE);
+                    send(409, $body === false ? '{"error":"encode"}' : $body, 'application/json; charset=utf-8');
+                }
+                fail('не найдено: ' . $query, 404);
+            }
+            $id = site_page_id((int) $exact['id'], $exact['name'], $kind);
+        }
+
+        $cacheKey = 'schedule-' . $kind . '-' . $id;
+        $teacherCache = $kind === 'group' ? teacher_cache() : [];
+
+        $cached = cache_get($cacheKey);
+        if ($cached !== null) {
+            if ($kind === 'group') {
+                $cached = apply_teacher_names($cached, $teacherCache, false);
+            }
+            $cached['cached'] = true;
+            respond_json($cached, $kind === 'group' ? pending_teachers($cached, $teacherCache) : []);
+        }
+
+        $lockFile = cache_file($cacheKey) . '.lock';
+        $lock = @fopen($lockFile, 'c');
+        $locked = $lock ? flock($lock, LOCK_EX | LOCK_NB) : false;
+
+        if (!$locked) {
+            $shared = cache_get($cacheKey, 604800);
+            if ($shared !== null) {
+                if ($kind === 'group') {
+                    $shared = apply_teacher_names($shared, $teacherCache, false);
+                }
+                $shared['cached'] = true;
+                $shared['stale'] = true;
+                send(200, (string) json_encode($shared, JSON_UNESCAPED_UNICODE), 'application/json; charset=utf-8', 'public, max-age=30');
+            }
+            if ($lock) {
+                flock($lock, LOCK_EX);
+                $locked = true;
+            }
+        }
+
+        try {
+            $data = parse_schedule(site_page($id, $kind), $kind);
+            $data['group']['id'] = $id;
+            cache_put($cacheKey, $data);
+            if ($kind === 'group') {
+                $data = apply_teacher_names($data, $teacherCache, false);
+            }
+
+            if ($locked && $lock) {
+                flock($lock, LOCK_UN);
+                fclose($lock);
+            }
+
+            respond_json($data, $kind === 'group' ? pending_teachers($data, $teacherCache) : []);
+        } catch (Throwable $error) {
+            if ($locked && $lock) {
+                flock($lock, LOCK_UN);
+                fclose($lock);
+            }
+            $stale = cache_get($cacheKey, 604800);
+            if ($stale === null) {
+                throw $error;
+            }
+            if ($kind === 'group') {
+                $stale = apply_teacher_names($stale, $teacherCache, false);
+            }
+            $stale['cached'] = true;
+            $stale['stale'] = true;
+            send(200, (string) json_encode($stale, JSON_UNESCAPED_UNICODE), 'application/json; charset=utf-8', 'public, max-age=60');
+        }
+    }
+
+    if ($action === 'consultations') {
+        $id = (int) ($_GET['id'] ?? 0);
+        $query = normalize_query(trim((string) ($_GET['q'] ?? '')));
+        if ($id <= 0 && $query === '') {
+            fail('нужен параметр id или q', 400);
+        }
+
+        if ($id <= 0) {
             $exact = null;
             foreach (site_search($query) as $item) {
                 if (mb_strtoupper($item['name']) === mb_strtoupper($query)) {
@@ -649,58 +989,118 @@ try {
             $id = site_page_id((int) $exact['id'], $exact['name'], 'group');
         }
 
-        $cached = cache_get('schedule-' . $id);
-        $teacherCache = teacher_cache();
+        $cacheKey = 'consult-group-' . $id;
+        $cached = cache_get($cacheKey, 1800);
         if ($cached !== null) {
-            $cached = apply_teacher_names($cached, $teacherCache, false);
-            $cached['cached'] = true;
-            respond_json($cached, pending_teachers($cached, $teacherCache));
+            send(200, (string) json_encode($cached, JSON_UNESCAPED_UNICODE), 'application/json; charset=utf-8', 'public, max-age=1800');
         }
 
-        $lockFile = cache_file('schedule-' . $id) . '.lock';
-        $lock = @fopen($lockFile, 'c');
-        $locked = $lock ? flock($lock, LOCK_EX | LOCK_NB) : false;
+        $schedule = cache_get('schedule-group-' . $id);
+        if ($schedule === null) {
+            $schedule = parse_schedule(site_page($id, 'group'), 'group');
+            $schedule['group']['id'] = $id;
+            cache_put('schedule-group-' . $id, $schedule);
+        }
+        $schedule = apply_teacher_names($schedule, teacher_cache(), false);
 
-        if (!$locked) {
-            $shared = cache_get('schedule-' . $id, 604800);
-            if ($shared !== null) {
-                $shared = apply_teacher_names($shared, $teacherCache, false);
-                $shared['cached'] = true;
-                $shared['stale'] = true;
-                send(200, (string) json_encode($shared, JSON_UNESCAPED_UNICODE), 'application/json; charset=utf-8', 'public, max-age=30');
-            }
-            if ($lock) {
-                flock($lock, LOCK_EX);
-                $locked = true;
+        $teacherIds = [];
+        $teacherNames = [];
+        foreach ($schedule['weeks'] as $days) {
+            foreach ($days as $lessons) {
+                foreach ($lessons as $lesson) {
+                    foreach (($lesson['teachers'] ?? []) as $teacher) {
+                        if (!empty($teacher['id'])) {
+                            $teacherIds[(int) $teacher['id']] = true;
+                            $teacherNames[(int) $teacher['id']] = $teacher['name'];
+                        }
+                    }
+                }
             }
         }
 
-        try {
-            $data = parse_schedule(site_page($id, 'group'));
-            $data['group']['id'] = $id;
-            cache_put('schedule-' . $id, $data);
-            $data = apply_teacher_names($data, $teacherCache, false);
+        $consultations = [];
+        $collect = static function (array $items, int $teacherId) use (&$consultations, $teacherNames): void {
+            $host = $teacherNames[$teacherId] ?? '';
+            foreach ($items as $item) {
+                $item['teachers'] = [['name' => $host, 'id' => $teacherId]];
+                $item['teacher'] = $host;
+                $consultations[] = $item;
+            }
+        };
 
-            if ($locked && $lock) {
-                flock($lock, LOCK_UN);
-                fclose($lock);
+        $missing = [];
+        foreach (array_keys($teacherIds) as $teacherId) {
+            $one = cache_get('consult-' . $teacherId, 21600);
+            if ($one === null) {
+                $missing[] = $teacherId;
+                continue;
             }
-
-            respond_json($data, pending_teachers($data, $teacherCache));
-        } catch (Throwable $error) {
-            if ($locked && $lock) {
-                flock($lock, LOCK_UN);
-                fclose($lock);
-            }
-            $stale = cache_get('schedule-' . $id, 604800);
-            if ($stale === null) {
-                throw $error;
-            }
-            $stale = apply_teacher_names($stale, $teacherCache, false);
-            $stale['cached'] = true;
-            $stale['stale'] = true;
-            send(200, (string) json_encode($stale, JSON_UNESCAPED_UNICODE), 'application/json; charset=utf-8', 'public, max-age=60');
+            $collect($one, $teacherId);
         }
+
+        $failed = 0;
+        if ($missing) {
+            $urls = [];
+            foreach ($missing as $teacherId) {
+                $urls[$teacherId] = SITE . '/timetable/professor/' . $teacherId;
+            }
+            foreach (request_many($urls, 8, 20) as $teacherId => $body) {
+                if (!is_string($body) || strlen($body) < 2000) {
+                    $failed++;
+                    continue;
+                }
+                $items = parse_consultations($body);
+                cache_put('consult-' . $teacherId, $items);
+                $collect($items, (int) $teacherId);
+            }
+        }
+
+        $seen = [];
+        $unique = [];
+        foreach ($consultations as $item) {
+            $key = $item['date'] . '|' . $item['time'] . '|' . $item['subject'] . '|' . $item['room'];
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            $unique[] = $item;
+        }
+        usort($unique, static function (array $a, array $b): int {
+            $left = DateTime::createFromFormat('d.m.Y', $a['date']);
+            $right = DateTime::createFromFormat('d.m.Y', $b['date']);
+            if (!$left || !$right) {
+                return strcmp($a['date'], $b['date']);
+            }
+            return $left <=> $right;
+        });
+
+        $payload = [
+            'group' => ['id' => $id, 'name' => $schedule['group']['name'] ?? ''],
+            'consultations' => $unique,
+            'teachers' => count($teacherIds),
+            'partial' => $failed > 0,
+        ];
+        cache_put($cacheKey, $payload);
+        send(200, (string) json_encode($payload, JSON_UNESCAPED_UNICODE), 'application/json; charset=utf-8', 'public, max-age=1800');
+    }
+
+    if ($action === 'hit') {
+        $kind = ((string) ($_GET['kind'] ?? 'group')) === 'professor' ? 'professor' : 'group';
+        $name = mb_substr(trim((string) ($_GET['name'] ?? '')), 0, 120);
+        $stats = visit_stats($kind, $name);
+        $body = json_encode(['total' => $stats['total'], 'today' => $stats['today']], JSON_UNESCAPED_UNICODE);
+        send(200, $body === false ? '{}' : $body, 'application/json; charset=utf-8');
+    }
+
+    if ($action === 'stats') {
+        $stats = visit_stats();
+        $targets = $stats['targets'];
+        arsort($targets);
+        $stats['top'] = array_slice($targets, 0, 25, true);
+        $stats['days'] = array_slice($stats['days'], -30, null, true);
+        unset($stats['targets']);
+        $body = json_encode($stats, JSON_UNESCAPED_UNICODE);
+        send(200, $body === false ? '{}' : $body, 'application/json; charset=utf-8');
     }
 
     if ($action === 'warm') {

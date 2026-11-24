@@ -3,12 +3,13 @@ import datetime
 import logging
 import asyncio
 import os
+import re
 import time
 import html
 import threading
 
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, Forbidden
 import pytz
 
@@ -19,7 +20,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "tz-1 ptb22"
+BUILD = "buttons-1 ptb22"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 SITE_URL = "https://hekkeyne.ru/timetable/"
@@ -42,12 +43,15 @@ def group_link(group_id, group_name=None):
             f'\n<a href="{pallada}">Полное расписание Паллада СибГУ</a>')
 
 
-async def reply_plain(update, manager, text):
-    msg = await update.message.reply_text(text, parse_mode='HTML')
+async def reply_plain(update, manager, text, keyboard=None):
+    if keyboard is None:
+        msg = await update.message.reply_text(text, parse_mode='HTML')
+    else:
+        msg = await update.message.reply_text(text, parse_mode='HTML', reply_markup=keyboard)
     manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 
-async def deliver_day(update, manager, schedule, sub, date, header=None):
+async def deliver_day(update, manager, schedule, sub, date, header=None, keyboard=None):
     chat_id, thread_id = dest_key(update)
     group = sub.get("group_name") or ""
     stamp = date.strftime("%d.%m.%Y")
@@ -55,7 +59,7 @@ async def deliver_day(update, manager, schedule, sub, date, header=None):
         caption = f"{header}, {stamp}" if header else f"Расписание {group} на {stamp}"
         try:
             message_id = await asyncio.to_thread(
-                wg.send_widget_day, chat_id, schedule, sub, date, caption, thread_id)
+                wg.send_widget_day, chat_id, schedule, sub, date, caption, thread_id, keyboard)
             manager.save_message(chat_id, update.effective_user.id, message_id)
             return
         except Exception as exc:
@@ -64,7 +68,7 @@ async def deliver_day(update, manager, schedule, sub, date, header=None):
     text = format_schedule(schedule, sub, date)
     if header:
         text = f"<b>{esc(header)}</b>\n\n" + text
-    await reply_plain(update, manager, text)
+    await reply_plain(update, manager, text, keyboard)
 
 def esc(value):
     return html.escape(str(value if value is not None else ""))
@@ -150,6 +154,12 @@ class DatabaseManager:
                     UNIQUE (chat_id, thread_id)
                 )
             ''')
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS teacher_links (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT
+                )
+            ''')
 
     def save_message(self, chat_id, user_id, message_id):
         with sqlite3.connect(DB_PATH) as conn:
@@ -225,6 +235,18 @@ class DatabaseManager:
                 (1 if enabled else 0, sub_id)
             )
 
+    def save_teacher(self, teacher_id, name):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute('INSERT OR REPLACE INTO teacher_links (id, name) VALUES (?, ?)',
+                         (teacher_id, name))
+            conn.execute('DELETE FROM teacher_links WHERE id NOT IN '
+                         '(SELECT id FROM teacher_links ORDER BY rowid DESC LIMIT 500)')
+
+    def get_teacher(self, teacher_id):
+        with sqlite3.connect(DB_PATH) as conn:
+            row = conn.execute('SELECT name FROM teacher_links WHERE id = ?', (teacher_id,)).fetchone()
+            return row[0] if row else None
+
     def migrate_legacy_settings(self):
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
@@ -245,6 +267,44 @@ class DatabaseManager:
 
 def kras_today():
     return datetime.datetime.now(KRASNOYARSK_TZ).date()
+
+def monday_of_week():
+    today = kras_today()
+    return today - datetime.timedelta(days=today.weekday())
+
+def day_short(date):
+    names = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+    return names[date.weekday()] + " " + date.strftime("%d.%m")
+
+def day_keyboard(weekday):
+    monday = monday_of_week()
+    first = monday + datetime.timedelta(days=weekday)
+    second = first + datetime.timedelta(days=7)
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(day_short(first), callback_data="d|%d|0" % weekday),
+        InlineKeyboardButton(day_short(second), callback_data="d|%d|1" % weekday),
+    ]])
+
+def week_keyboard():
+    monday = monday_of_week()
+    second = monday + datetime.timedelta(days=7)
+    last = second + datetime.timedelta(days=6)
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Эта неделя", callback_data="w|0"),
+        InlineKeyboardButton(second.strftime("%d.%m") + "-" + last.strftime("%d.%m"), callback_data="w|1"),
+    ]])
+
+def teacher_week_keyboard(teacher_id):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Эта неделя", callback_data="tw|%d|0" % teacher_id),
+        InlineKeyboardButton("Следующая", callback_data="tw|%d|1" % teacher_id),
+    ]])
+
+def entity_html(item, kind):
+    if kind == "professor":
+        links = item.get("teacher_links") or []
+        return ", ".join(esc(link.get("name") or "") for link in links)
+    return teacher_html(item)
 
 def get_day_name(date):
     days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -429,7 +489,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/tomorrow БПА24-02, /week БПА24-02, /day вторник БПА24-02\n\n"
         "<b>Сессия:</b>\n"
         "/exams - все экзамены группы\n"
-        "/nearexam - ближайший экзамен\n\n"
+        "/nearexam - ближайший экзамен\n"
+        "/consults - консультации группы\n\n"
+        "<b>Преподаватели:</b>\n"
+        "/prep Масаев - найти преподавателя и открыть его расписание\n\n"
         "<b>Автоотправка:</b>\n"
         "/setchat - публиковать расписание в этот чат после последней пары\n"
         "/disable_auto - выключить здесь или по номеру: /disable_auto 2\n"
@@ -452,7 +515,7 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await deliver_day(update, manager, schedule, sub, today)
+    await deliver_day(update, manager, schedule, sub, today, keyboard=day_keyboard(today.weekday()))
 
 @with_cleanup
 async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -468,7 +531,7 @@ async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await reply_plain(update, manager, format_schedule(schedule, sub, tmr))
+    await reply_plain(update, manager, format_schedule(schedule, sub, tmr), day_keyboard(tmr.weekday()))
 
 @with_cleanup
 async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -501,7 +564,7 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await reply_plain(update, manager, format_schedule(schedule, sub, target))
+    await reply_plain(update, manager, format_schedule(schedule, sub, target), day_keyboard(target.weekday()))
 
 @with_cleanup
 async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -517,7 +580,7 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await reply_plain(update, manager, format_week(schedule, sub, today))
+    await reply_plain(update, manager, format_week(schedule, sub, today), week_keyboard())
 
 def describe_place(sub):
     chat_id = sub["chat_id"]
@@ -566,8 +629,10 @@ async def apply_group(update, chat_id, thread_id, query):
     sub = {"group_id": exact["id"], "group_name": exact["name"]}
     schedule = get_schedule_or_none(exact["id"])
     if schedule:
-        await deliver_day(update, manager, schedule, sub, kras_today(),
-                          header=f"Группа сохранена: {exact['name']}")
+        today = kras_today()
+        await deliver_day(update, manager, schedule, sub, today,
+                          header=f"Группа сохранена: {exact['name']}",
+                          keyboard=day_keyboard(today.weekday()))
     else:
         msg = await update.message.reply_text(
             f"<b>Группа сохранена: {esc(exact['name'])}</b>\n\n"
@@ -841,6 +906,146 @@ async def nearexam_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await reply_plain(update, manager, format_nearest_exam(schedule, sub))
 
+def consult_key(item):
+    raw = "%s %s" % (item.get("date", ""), (item.get("time") or "").split("-")[0])
+    try:
+        return datetime.datetime.strptime(raw.strip(), "%d.%m.%Y %H:%M")
+    except ValueError:
+        return datetime.datetime.max
+
+
+def format_consults(items, sub):
+    text = f"<b>Консультации: {esc(sub['group_name'])}</b>\n\n"
+    link = group_link(sub.get("group_id"), sub.get("group_name"))
+    if not items:
+        return text + "Пока не опубликованы. Появятся, когда вуз их выложит." + link
+    for item in sorted(items, key=consult_key):
+        teachers = ", ".join(esc(person.get("name") or "") for person in (item.get("teachers") or []) if person.get("name"))
+        text += (f"<b>{esc(item.get('date'))}</b> в {esc(item.get('time'))}\n"
+                 f"{teachers}\n"
+                 f"{esc(item.get('room'))}\n\n")
+    return text.strip() + link
+
+
+def get_teacher_or_none(name):
+    try:
+        return ss.get_teacher_schedule(name)
+    except ss.ScheduleError as exc:
+        logging.warning("Не удалось получить расписание преподавателя %s: %s", name, exc)
+        return None
+
+
+@with_cleanup
+async def consults_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    manager = DatabaseManager()
+    chosen = await group_by_query(update, " ".join(context.args))
+    if chosen is False:
+        return
+    sub = chosen or await require_group(update, manager)
+    if not sub:
+        return
+    try:
+        items = await asyncio.to_thread(ss.get_consultations, sub["group_id"])
+    except ss.ScheduleError as exc:
+        await reply_plain(update, manager, "Не удалось получить консультации: " + esc(exc) + FOOTER_LINK)
+        return
+    await reply_plain(update, manager, format_consults(items, sub))
+
+
+@with_cleanup
+async def prep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    manager = DatabaseManager()
+    query = " ".join(context.args).strip()
+    if not query:
+        await reply_plain(update, manager,
+                          "Напишите фамилию или ФИО: <code>/prep Масаев</code>" + FOOTER_LINK)
+        return
+    try:
+        people = await asyncio.to_thread(ss.search_groups, query)
+    except ss.ScheduleError as exc:
+        await reply_plain(update, manager, "Поиск недоступен: " + esc(exc) + FOOTER_LINK)
+        return
+
+    teachers = [person for person in people if not re.search(r"\d", person["name"])][:8]
+    if not teachers:
+        await reply_plain(update, manager, f"Преподаватель «{esc(query)}» не найден." + FOOTER_LINK)
+        return
+
+    rows = []
+    for person in teachers:
+        manager.save_teacher(person["id"], person["name"])
+        rows.append([InlineKeyboardButton(person["name"], callback_data="p|%d" % person["id"])])
+    msg = await update.message.reply_text(
+        "<b>Нашёл преподавателей</b>\n\nВыберите кнопкой:",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(rows))
+    manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    parts = (query.data or "").split("|")
+
+    if parts[0] in ("d", "w"):
+        chat_id = query.message.chat_id
+        thread_id = getattr(query.message, "message_thread_id", None) or 0
+        manager = DatabaseManager()
+        sub = manager.get_subscription(chat_id, thread_id)
+        if not sub or not sub.get("group_id"):
+            await query.edit_message_text("Сначала задайте группу: /group БПА24-01")
+            return
+        schedule = get_schedule_or_none(sub["group_id"])
+        if not schedule:
+            await query.edit_message_text("Не удалось получить расписание, попробуйте позже.")
+            return
+        try:
+            monday = monday_of_week()
+            if parts[0] == "d":
+                weekday = int(parts[1])
+                offset = int(parts[2])
+                target = monday + datetime.timedelta(days=offset * 7 + weekday)
+                text = format_schedule(schedule, sub, target)
+                keyboard = day_keyboard(weekday)
+            else:
+                offset = int(parts[1])
+                target = monday + datetime.timedelta(days=offset * 7)
+                text = format_week(schedule, sub, target)
+                keyboard = week_keyboard()
+        except (ValueError, IndexError):
+            return
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+        except BadRequest:
+            pass
+        return
+
+    if parts[0] in ("p", "tw"):
+        try:
+            teacher_id = int(parts[1])
+            offset = int(parts[2]) if parts[0] == "tw" else 0
+        except (ValueError, IndexError):
+            return
+        manager = DatabaseManager()
+        name = manager.get_teacher(teacher_id)
+        if not name:
+            await query.edit_message_text("Не нашёл преподавателя, поищите заново: /prep Фамилия")
+            return
+        schedule = get_teacher_or_none(name)
+        if not schedule:
+            await query.edit_message_text("Не удалось получить расписание преподавателя, попробуйте позже.")
+            return
+        sub = {"group_id": None, "group_name": schedule.get("group_name") or name}
+        target = monday_of_week() + datetime.timedelta(days=offset * 7)
+        text = format_week(schedule, sub, target)
+        try:
+            await query.edit_message_text(text, parse_mode="HTML",
+                                          reply_markup=teacher_week_keyboard(teacher_id))
+        except BadRequest:
+            pass
+
+
 async def send_schedule_to(bot, sub, schedule, date):
     text = format_schedule(schedule, sub, date)
     kwargs = {"chat_id": sub["chat_id"], "text": text, "parse_mode": "HTML"}
@@ -976,19 +1181,21 @@ def teacher_html(item):
     return ", ".join(parts)
 
 
-def lesson_block(lesson):
+def lesson_block(lesson, kind="group"):
     return (f"<b>{esc(lesson['subject'])}</b> ({esc(lesson['type'])})\n"
-            f"{teacher_html(lesson)}\n"
+            f"{entity_html(lesson, kind)}\n"
             f"{esc(lesson['room'])}\n\n")
 
-def format_schedule(schedule, sub, date):
+def format_schedule(schedule, sub, date, kind=None):
+    kind = kind or schedule.get("kind") or "group"
     weekday = get_day_name(date)
     week_no = ss.week_number_for(date, schedule)
     lessons = ss.lessons_for(schedule, date)
     footer = group_link(sub.get("group_id"), sub.get("group_name"))
 
+    label = "Преподаватель" if kind == "professor" else "Группа"
     header = (f"Расписание на {get_russian_day(weekday)} ({date.strftime('%d.%m.%Y')})\n"
-              f"Группа: {esc(sub['group_name'])}\n"
+              f"{label}: {esc(sub['group_name'])}\n"
               f"Неделя: {week_no}-я\n")
     if not lessons:
         return header + "\nВыходной! Пар нет." + footer
@@ -1003,20 +1210,22 @@ def format_schedule(schedule, sub, date):
         common = next((l for l in group if l["subgroup"] == "все"), None)
         msg += f"{time_slot}\n"
         if common:
-            msg += lesson_block(common)
+            msg += lesson_block(common, kind)
         else:
             for i, lesson in enumerate(group):
                 if i > 0:
                     msg += "\n"
                 msg += f"{lesson['subgroup']}:\n"
-                msg += lesson_block(lesson)
+                msg += lesson_block(lesson, kind)
             msg += "\n"
 
     return msg.strip() + footer
 
-def format_week(schedule, sub, today):
+def format_week(schedule, sub, today, kind=None):
+    kind = kind or schedule.get("kind") or "group"
     monday = today - datetime.timedelta(days=today.weekday())
-    text = f"<b>Расписание на неделю</b>\nГруппа: {esc(sub['group_name'])}\n\n"
+    title = "Расписание на неделю" if kind == "group" else "Расписание преподавателя на неделю"
+    text = f"<b>{title}</b>\n{esc(sub['group_name'])}\n\n"
     for i in range(7):
         current = monday + datetime.timedelta(days=i)
         lessons = ss.lessons_for(schedule, current)
@@ -1034,11 +1243,21 @@ def format_week(schedule, sub, today):
             group = time_groups[time_slot]
             common = next((l for l in group if l["subgroup"] == "все"), None)
             if common:
-                text += f"{time_slot} | <b>{esc(common['subject'])}</b> ({esc(common['type'])})\n"
+                line = f"{time_slot} | <b>{esc(common['subject'])}</b> ({esc(common['type'])})"
+                if kind == "professor":
+                    who = entity_html(common, kind)
+                    if who:
+                        line += ", " + who
+                text += line + "\n"
             else:
                 for lesson in group:
-                    text += (f"{time_slot} | {esc(lesson['subgroup'])}: "
-                             f"<b>{esc(lesson['subject'])}</b> ({esc(lesson['type'])})\n")
+                    line = (f"{time_slot} | {esc(lesson['subgroup'])}: "
+                            f"<b>{esc(lesson['subject'])}</b> ({esc(lesson['type'])})")
+                    if kind == "professor":
+                        who = entity_html(lesson, kind)
+                        if who:
+                            line += ", " + who
+                    text += line + "\n"
         text += "\n"
 
     text += f"Неделя: {ss.week_number_for(today, schedule)}-я"
@@ -1069,6 +1288,10 @@ def main():
 
     app.add_handler(CommandHandler("exams", exams_cmd))
     app.add_handler(CommandHandler("nearexam", nearexam_cmd))
+    app.add_handler(CommandHandler("consults", consults_cmd))
+    app.add_handler(CommandHandler("prep", prep_cmd))
+
+    app.add_handler(CallbackQueryHandler(on_callback))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, group_text_handler))
 

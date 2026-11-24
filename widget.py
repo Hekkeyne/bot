@@ -242,10 +242,12 @@ def build_state(schedule, sub, date):
     return json.dumps(state, ensure_ascii=False, separators=(",", ":"))
 
 
-def send_widget(chat_id, chat_data, caption, thread_id=0):
+def send_widget(chat_id, chat_data, caption, thread_id=0, reply_markup=None):
     payload = {"chat_id": chat_id, "html": WIDGET_HTML, "chat_data": chat_data, "caption": caption}
     if thread_id:
         payload["message_thread_id"] = thread_id
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup.to_dict()
 
     response = requests.post(WIDGET_ENDPOINT, json=payload, timeout=30)
     data = response.json()
@@ -254,5 +256,5 @@ def send_widget(chat_id, chat_data, caption, thread_id=0):
     return int(data["result"]["message_id"])
 
 
-def send_widget_day(chat_id, schedule, sub, date, caption, thread_id=0):
-    return send_widget(chat_id, build_state(schedule, sub, date), caption, thread_id)
+def send_widget_day(chat_id, schedule, sub, date, caption, thread_id=0, reply_markup=None):
+    return send_widget(chat_id, build_state(schedule, sub, date), caption, thread_id, reply_markup)
