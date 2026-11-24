@@ -277,21 +277,15 @@ def day_short(date):
     return names[date.weekday()] + " " + date.strftime("%d.%m")
 
 def day_keyboard(weekday):
-    monday = monday_of_week()
-    first = monday + datetime.timedelta(days=weekday)
-    second = first + datetime.timedelta(days=7)
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(day_short(first), callback_data="d|%d|0" % weekday),
-        InlineKeyboardButton(day_short(second), callback_data="d|%d|1" % weekday),
+        InlineKeyboardButton("Эта неделя", callback_data="d|%d|0" % weekday),
+        InlineKeyboardButton("Следующая неделя", callback_data="d|%d|1" % weekday),
     ]])
 
 def week_keyboard():
-    monday = monday_of_week()
-    second = monday + datetime.timedelta(days=7)
-    last = second + datetime.timedelta(days=6)
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("Эта неделя", callback_data="w|0"),
-        InlineKeyboardButton(second.strftime("%d.%m") + "-" + last.strftime("%d.%m"), callback_data="w|1"),
+        InlineKeyboardButton("Следующая неделя", callback_data="w|1"),
     ]])
 
 def teacher_week_keyboard(teacher_id):
