@@ -1167,9 +1167,9 @@ def teacher_html(item):
     parts = []
     for link in links:
         name = esc(link.get("name") or "")
-        target = link.get("id")
-        if target:
-            parts.append(f'<a href="{ss.BASE_URL}/timetable/professor/{target}">{name}</a>')
+        surname = (link.get("name") or "").split(" ")[0]
+        if surname:
+            parts.append(f'<a href="{ss.site_link(surname)}">{name}</a>')
         else:
             parts.append(name)
     return ", ".join(parts)
@@ -1242,6 +1242,8 @@ def format_week(schedule, sub, today, kind=None):
                     who = entity_html(common, kind)
                     if who:
                         line += ", " + who
+                    if common.get("room"):
+                        line += ", " + esc(common["room"])
                 text += line + "\n"
             else:
                 for lesson in group:
@@ -1251,6 +1253,8 @@ def format_week(schedule, sub, today, kind=None):
                         who = entity_html(lesson, kind)
                         if who:
                             line += ", " + who
+                        if lesson.get("room"):
+                            line += ", " + esc(lesson["room"])
                     text += line + "\n"
         text += "\n"
 
