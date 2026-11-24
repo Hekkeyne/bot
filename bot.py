@@ -272,14 +272,24 @@ def monday_of_week():
     today = kras_today()
     return today - datetime.timedelta(days=today.weekday())
 
-def day_short(date):
-    names = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
-    return names[date.weekday()] + " " + date.strftime("%d.%m")
+def relative_day_label(date):
+    delta = (date - kras_today()).days
+    if delta == -1:
+        word = "вчера"
+    elif delta == 0:
+        word = "сегодня"
+    elif delta == 1:
+        word = "завтра"
+    else:
+        word = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"][date.weekday()]
+    return word + " " + date.strftime("%d.%m")
 
-def day_keyboard(weekday):
+def day_keyboard(date):
+    before = date - datetime.timedelta(days=1)
+    after = date + datetime.timedelta(days=1)
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("Эта неделя", callback_data="d|%d|0" % weekday),
-        InlineKeyboardButton("Следующая неделя", callback_data="d|%d|1" % weekday),
+        InlineKeyboardButton(relative_day_label(before), callback_data="d|" + before.isoformat()),
+        InlineKeyboardButton(relative_day_label(after), callback_data="d|" + after.isoformat()),
     ]])
 
 def week_keyboard():
@@ -327,12 +337,14 @@ async def group_by_query(update, query):
         return {"group_id": exact["id"], "group_name": exact["name"]}
 
     if matches:
-        names = ", ".join(esc(g["name"]) for g in matches)
-        text = (f"Нашлось несколько групп: {names}.\n"
-                f"Напишите название полностью." + FOOTER_LINK)
+        PENDING_GROUP[dest_key(update)] = time.time()
+        rows = [[InlineKeyboardButton(g["name"], callback_data="g|" + g["name"])] for g in matches[:10]]
+        msg = await update.message.reply_text(
+            "Нашлось несколько групп, выберите кнопкой:",
+            parse_mode='HTML', reply_markup=InlineKeyboardMarkup(rows))
     else:
-        text = f"Группа «{esc(query)}» не найдена." + FOOTER_LINK
-    msg = await update.message.reply_text(text, parse_mode='HTML')
+        msg = await update.message.reply_text(
+            f"Группа «{esc(query)}» не найдена." + FOOTER_LINK, parse_mode='HTML')
     DatabaseManager().save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
     return False
 
@@ -509,7 +521,7 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await deliver_day(update, manager, schedule, sub, today, keyboard=day_keyboard(today.weekday()))
+    await deliver_day(update, manager, schedule, sub, today, keyboard=day_keyboard(today))
 
 @with_cleanup
 async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -525,7 +537,7 @@ async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await reply_plain(update, manager, format_schedule(schedule, sub, tmr), day_keyboard(tmr.weekday()))
+    await reply_plain(update, manager, format_schedule(schedule, sub, tmr), day_keyboard(tmr))
 
 @with_cleanup
 async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -558,7 +570,7 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await reply_plain(update, manager, format_schedule(schedule, sub, target), day_keyboard(target.weekday()))
+    await reply_plain(update, manager, format_schedule(schedule, sub, target), day_keyboard(target))
 
 @with_cleanup
 async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -602,9 +614,12 @@ async def apply_group(update, chat_id, thread_id, query):
 
     if not exact and matches:
         PENDING_GROUP[(chat_id, thread_id)] = time.time()
-        lines = "\n".join(f"• <code>{esc(g['name'])}</code>" for g in matches)
+        rows = []
+        for candidate in matches[:10]:
+            rows.append([InlineKeyboardButton(candidate["name"], callback_data="g|" + candidate["name"])])
         msg = await update.message.reply_text(
-            "Нашлось несколько групп, уточните название:\n\n" + lines, parse_mode='HTML')
+            "Нашлось несколько групп, выберите кнопкой:",
+            parse_mode='HTML', reply_markup=InlineKeyboardMarkup(rows))
         manager.save_message(chat_id, user_id, msg.message_id)
         return
 
@@ -626,7 +641,7 @@ async def apply_group(update, chat_id, thread_id, query):
         today = kras_today()
         await deliver_day(update, manager, schedule, sub, today,
                           header=f"Группа сохранена: {exact['name']}",
-                          keyboard=day_keyboard(today.weekday()))
+                          keyboard=day_keyboard(today))
     else:
         msg = await update.message.reply_text(
             f"<b>Группа сохранена: {esc(exact['name'])}</b>\n\n"
@@ -982,7 +997,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     parts = (query.data or "").split("|")
 
-    if parts[0] in ("d", "w"):
+    if parts[0] == "d":
         chat_id = query.message.chat_id
         thread_id = getattr(query.message, "message_thread_id", None) or 0
         manager = DatabaseManager()
@@ -995,22 +1010,68 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Не удалось получить расписание, попробуйте позже.")
             return
         try:
-            monday = monday_of_week()
-            if parts[0] == "d":
-                weekday = int(parts[1])
-                offset = int(parts[2])
-                target = monday + datetime.timedelta(days=offset * 7 + weekday)
-                text = format_schedule(schedule, sub, target)
-                keyboard = day_keyboard(weekday)
-            else:
-                offset = int(parts[1])
-                target = monday + datetime.timedelta(days=offset * 7)
-                text = format_week(schedule, sub, target)
-                keyboard = week_keyboard()
+            target = datetime.date.fromisoformat(parts[1])
         except (ValueError, IndexError):
             return
+        text = format_schedule(schedule, sub, target)
         try:
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=day_keyboard(target))
+        except BadRequest:
+            pass
+        return
+
+    if parts[0] == "w":
+        chat_id = query.message.chat_id
+        thread_id = getattr(query.message, "message_thread_id", None) or 0
+        manager = DatabaseManager()
+        sub = manager.get_subscription(chat_id, thread_id)
+        if not sub or not sub.get("group_id"):
+            await query.edit_message_text("Сначала задайте группу: /group БПА24-01")
+            return
+        schedule = get_schedule_or_none(sub["group_id"])
+        if not schedule:
+            await query.edit_message_text("Не удалось получить расписание, попробуйте позже.")
+            return
+        try:
+            offset = int(parts[1])
+        except (ValueError, IndexError):
+            return
+        target = monday_of_week() + datetime.timedelta(days=offset * 7)
+        text = format_week(schedule, sub, target)
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=week_keyboard())
+        except BadRequest:
+            pass
+        return
+
+    if parts[0] == "g":
+        name = "|".join(parts[1:]).strip()
+        chat_id = query.message.chat_id
+        thread_id = getattr(query.message, "message_thread_id", None) or 0
+        manager = DatabaseManager()
+        try:
+            exact, _ = await asyncio.to_thread(ss.find_group, name)
+        except ss.ScheduleError:
+            await query.edit_message_text("Не получилось проверить группу, попробуйте позже.")
+            return
+        if not exact:
+            await query.edit_message_text("Группа не найдена. Напишите название точнее.")
+            return
+        title = getattr(query.message.chat, "title", None)
+        manager.set_group(chat_id, thread_id, exact["id"], exact["name"], query.from_user.id, title)
+        PENDING_GROUP.pop((chat_id, thread_id), None)
+        schedule = get_schedule_or_none(exact["id"])
+        if not schedule:
+            await query.edit_message_text(
+                f"<b>Группа сохранена: {esc(exact['name'])}</b>\n\nНе удалось получить расписание.",
+                parse_mode="HTML")
+            return
+        today = kras_today()
+        sub = {"group_id": exact["id"], "group_name": exact["name"]}
+        text = (f"<b>Группа сохранена: {esc(exact['name'])}</b>\n\n"
+                + format_schedule(schedule, sub, today))
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=day_keyboard(today))
         except BadRequest:
             pass
         return
