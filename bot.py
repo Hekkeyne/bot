@@ -8,19 +8,19 @@ import html
 import threading
 
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.error import BadRequest, Forbidden
 import pytz
 
 import storage
 import schedule_source as ss
-import widget as wg
+import render as rn
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "spacestore-3 ptb22"
+BUILD = "photo-text-1 ptb22"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 SITE_URL = "https://hekkeyne.ru/timetable/"
@@ -30,6 +30,8 @@ KRASNOYARSK_TZ = pytz.timezone('Asia/Krasnoyarsk')
 PUBLISH_DELAY_MINUTES = 0
 STALE_PUBLISH_LIMIT = datetime.timedelta(hours=3)
 GROUP_PROMPT_TTL = 600
+FORMATS = {"photo": "картинкой", "text": "текстом"}
+DEFAULT_FORMAT = "text"
 
 PENDING_GROUP = {}
 AUTO_WAKE = None
@@ -54,24 +56,157 @@ async def reply_plain(update, manager, text, keyboard=None):
     manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
 
 
-async def deliver_day(update, manager, schedule, sub, date, header=None, keyboard=None):
-    chat_id, thread_id = dest_key(update)
-    group = sub.get("group_name") or ""
-    stamp = date.strftime("%d.%m.%Y")
-    if chat_id > 0:
-        caption = f"{header}, {stamp}" if header else f"Расписание {group} на {stamp}"
+async def send_day_message(bot, chat_id, thread_id, schedule, sub, date, fmt, theme_key, keyboard=None, header=None):
+    fmt = fmt if fmt in FORMATS else DEFAULT_FORMAT
+    if fmt == "photo":
         try:
-            message_id = await asyncio.to_thread(
-                wg.send_widget_day, chat_id, schedule, sub, date, caption, thread_id, keyboard)
-            manager.save_message(chat_id, update.effective_user.id, message_id)
-            return
+            png = await asyncio.to_thread(rn.render_day, schedule, sub, date, theme_key, kras_today())
+            caption = rn.caption(schedule, sub, date)
+            if header:
+                caption = f"<b>{esc(header)}</b>\n" + caption
+            kwargs = {"chat_id": chat_id, "photo": png, "caption": caption, "parse_mode": "HTML"}
+            if thread_id:
+                kwargs["message_thread_id"] = thread_id
+            if keyboard is not None:
+                kwargs["reply_markup"] = keyboard
+            return await bot.send_photo(**kwargs)
         except Exception as exc:
-            logging.warning("Виджет не ушёл (%s), отправляю текст", exc)
+            logging.warning("Картинка дня не отправлена (%s), отправляю текст", exc)
 
     text = format_schedule(schedule, sub, date)
     if header:
         text = f"<b>{esc(header)}</b>\n\n" + text
-    await reply_plain(update, manager, text, keyboard)
+    kwargs = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if thread_id:
+        kwargs["message_thread_id"] = thread_id
+    if keyboard is not None:
+        kwargs["reply_markup"] = keyboard
+    return await bot.send_message(**kwargs)
+
+
+async def send_week_message(bot, chat_id, thread_id, schedule, sub, monday, fmt, theme_key, keyboard=None):
+    fmt = fmt if fmt in FORMATS else DEFAULT_FORMAT
+    if fmt == "photo":
+        try:
+            png = await asyncio.to_thread(rn.render_week, schedule, sub, monday, theme_key)
+            kwargs = {"chat_id": chat_id, "photo": png, "caption": rn.caption(schedule, sub, week=True),
+                      "parse_mode": "HTML"}
+            if thread_id:
+                kwargs["message_thread_id"] = thread_id
+            if keyboard is not None:
+                kwargs["reply_markup"] = keyboard
+            return await bot.send_photo(**kwargs)
+        except Exception as exc:
+            logging.warning("Картинка недели не отправлена (%s), отправляю текст", exc)
+
+    kwargs = {"chat_id": chat_id, "text": format_week(schedule, sub, monday), "parse_mode": "HTML"}
+    if thread_id:
+        kwargs["message_thread_id"] = thread_id
+    if keyboard is not None:
+        kwargs["reply_markup"] = keyboard
+    return await bot.send_message(**kwargs)
+
+
+def format_choice_keyboard(action):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Картинкой", callback_data="f|photo|" + action),
+        InlineKeyboardButton("Текстом", callback_data="f|text|" + action)
+    ]])
+
+
+async def prompt_format(update, manager, action):
+    msg = await update.message.reply_text(
+        "Как присылать расписание?",
+        reply_markup=format_choice_keyboard(action))
+    manager.save_message(update.effective_chat.id, update.effective_user.id, msg.message_id)
+
+
+def current_format(manager, chat_id, thread_id):
+    value = manager.get_settings(chat_id, thread_id).get("format")
+    return value if value in FORMATS else None
+
+
+def current_theme(manager, chat_id, thread_id):
+    value = manager.get_settings(chat_id, thread_id).get("theme")
+    return value if value in rn.THEMES else "default"
+
+
+def settings_text(manager, chat_id, thread_id):
+    fmt = current_format(manager, chat_id, thread_id)
+    theme_key = current_theme(manager, chat_id, thread_id)
+    format_text = FORMATS[fmt] if fmt else "не выбран"
+    return ("<b>Настройки</b>\n\n"
+            f"Формат: {format_text}\n"
+            f"Тема картинки: {rn.theme_label(theme_key)}\n\n"
+            "Тема применяется к картинкам.")
+
+
+def settings_keyboard(manager, chat_id, thread_id):
+    fmt = current_format(manager, chat_id, thread_id)
+    theme_key = current_theme(manager, chat_id, thread_id)
+    rows = [[
+        InlineKeyboardButton(("✓ " if fmt == "photo" else "") + "Картинкой", callback_data="s|f|photo"),
+        InlineKeyboardButton(("✓ " if fmt == "text" else "") + "Текстом", callback_data="s|f|text")
+    ]]
+    themes = []
+    for key in rn.THEME_ORDER:
+        label = ("✓ " if key == theme_key else "") + rn.theme_label(key)
+        themes.append(InlineKeyboardButton(label, callback_data="s|t|" + key))
+    for index in range(0, len(themes), 2):
+        rows.append(themes[index:index + 2])
+    return InlineKeyboardMarkup(rows)
+
+
+async def edit_day_view(query, bot, manager, chat_id, thread_id, schedule, sub, date):
+    fmt = current_format(manager, chat_id, thread_id) or DEFAULT_FORMAT
+    theme_key = current_theme(manager, chat_id, thread_id)
+    if fmt == "photo":
+        try:
+            png = await asyncio.to_thread(rn.render_day, schedule, sub, date, theme_key, kras_today())
+            await query.edit_message_media(
+                media=InputMediaPhoto(png, caption=rn.caption(schedule, sub, date), parse_mode="HTML"),
+                reply_markup=day_keyboard(date))
+            return
+        except BadRequest:
+            pass
+        except Exception as exc:
+            logging.warning("Не удалось обновить картинку дня: %s", exc)
+        await send_day_message(bot, chat_id, thread_id, schedule, sub, date, fmt, theme_key,
+                               keyboard=day_keyboard(date))
+        return
+    try:
+        await query.edit_message_text(format_schedule(schedule, sub, date), parse_mode="HTML",
+                                      reply_markup=day_keyboard(date))
+        return
+    except BadRequest:
+        pass
+    await send_day_message(bot, chat_id, thread_id, schedule, sub, date, fmt, theme_key, keyboard=day_keyboard(date))
+
+
+async def edit_week_view(query, bot, manager, chat_id, thread_id, schedule, sub, monday):
+    fmt = current_format(manager, chat_id, thread_id) or DEFAULT_FORMAT
+    theme_key = current_theme(manager, chat_id, thread_id)
+    if fmt == "photo":
+        try:
+            png = await asyncio.to_thread(rn.render_week, schedule, sub, monday, theme_key)
+            await query.edit_message_media(
+                media=InputMediaPhoto(png, caption=rn.caption(schedule, sub, week=True), parse_mode="HTML"),
+                reply_markup=week_keyboard())
+            return
+        except BadRequest:
+            pass
+        except Exception as exc:
+            logging.warning("Не удалось обновить картинку недели: %s", exc)
+        await send_week_message(bot, chat_id, thread_id, schedule, sub, monday, fmt, theme_key,
+                                keyboard=week_keyboard())
+        return
+    try:
+        await query.edit_message_text(format_week(schedule, sub, monday), parse_mode="HTML",
+                                      reply_markup=week_keyboard())
+        return
+    except BadRequest:
+        pass
+    await send_week_message(bot, chat_id, thread_id, schedule, sub, monday, fmt, theme_key, keyboard=week_keyboard())
 
 def esc(value):
     return html.escape(str(value if value is not None else ""))
@@ -142,6 +277,23 @@ class DatabaseManager:
         with STORE.lock:
             sub = self._find_sub(chat_id, thread_id)
             return dict(sub) if sub else None
+
+    def _settings_key(self, chat_id, thread_id):
+        return "%s:%s" % (int(chat_id), int(thread_id or 0))
+
+    def get_settings(self, chat_id, thread_id):
+        with STORE.lock:
+            settings = STORE.data.setdefault("settings", {})
+            return dict(settings.get(self._settings_key(chat_id, thread_id)) or {})
+
+    def set_setting(self, chat_id, thread_id, key, value):
+        with STORE.lock:
+            settings = STORE.data.setdefault("settings", {})
+            name = self._settings_key(chat_id, thread_id)
+            item = dict(settings.get(name) or {})
+            item[key] = value
+            settings[name] = item
+            STORE.dirty = True
 
     def set_auto(self, chat_id, thread_id, enabled):
         with STORE.lock:
@@ -447,6 +599,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/setchat - публиковать расписание в этот чат после последней пары\n"
         "/disable_auto - выключить здесь или по номеру: /disable_auto 2\n"
         "/sendnow N - принудительно отправить по номеру из /autosends\n"
+        "/settings - формат (картинкой или текстом) и тема картинки\n"
         + FOOTER_LINK
     )
     msg = await update.message.reply_text(text, parse_mode='HTML')
@@ -466,7 +619,14 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await deliver_day(update, manager, schedule, sub, today, keyboard=day_keyboard(today))
+    chat_id, thread_id = dest_key(update)
+    fmt = current_format(manager, chat_id, thread_id)
+    if not fmt:
+        await prompt_format(update, manager, "d|%s|%s" % (today.isoformat(), sub["group_id"]))
+        return
+    message = await send_day_message(context.bot, chat_id, thread_id, schedule, sub, today, fmt,
+                                     current_theme(manager, chat_id, thread_id), keyboard=day_keyboard(today))
+    manager.save_message(chat_id, update.effective_user.id, message.message_id)
 
 @with_cleanup
 async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -482,7 +642,14 @@ async def tomorrow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await reply_plain(update, manager, format_schedule(schedule, sub, tmr), day_keyboard(tmr))
+    chat_id, thread_id = dest_key(update)
+    fmt = current_format(manager, chat_id, thread_id)
+    if not fmt:
+        await prompt_format(update, manager, "d|%s|%s" % (tmr.isoformat(), sub["group_id"]))
+        return
+    message = await send_day_message(context.bot, chat_id, thread_id, schedule, sub, tmr, fmt,
+                                     current_theme(manager, chat_id, thread_id), keyboard=day_keyboard(tmr))
+    manager.save_message(chat_id, update.effective_user.id, message.message_id)
 
 @with_cleanup
 async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -515,7 +682,14 @@ async def day_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await reply_plain(update, manager, format_schedule(schedule, sub, target), day_keyboard(target))
+    chat_id, thread_id = dest_key(update)
+    fmt = current_format(manager, chat_id, thread_id)
+    if not fmt:
+        await prompt_format(update, manager, "d|%s|%s" % (target.isoformat(), sub["group_id"]))
+        return
+    message = await send_day_message(context.bot, chat_id, thread_id, schedule, sub, target, fmt,
+                                     current_theme(manager, chat_id, thread_id), keyboard=day_keyboard(target))
+    manager.save_message(chat_id, update.effective_user.id, message.message_id)
 
 @with_cleanup
 async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -526,12 +700,18 @@ async def week_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sub = chosen or await require_group(update, manager)
     if not sub:
         return
-    today = kras_today()
     schedule = get_schedule_or_none(sub["group_id"])
     if not schedule:
         await reply_plain(update, manager, "Не удалось получить расписание, попробуйте позже." + FOOTER_LINK)
         return
-    await reply_plain(update, manager, format_week(schedule, sub, today), week_keyboard())
+    chat_id, thread_id = dest_key(update)
+    fmt = current_format(manager, chat_id, thread_id)
+    if not fmt:
+        await prompt_format(update, manager, "w|0|%s" % sub["group_id"])
+        return
+    message = await send_week_message(context.bot, chat_id, thread_id, schedule, sub, monday_of_week(), fmt,
+                                      current_theme(manager, chat_id, thread_id), keyboard=week_keyboard())
+    manager.save_message(chat_id, update.effective_user.id, message.message_id)
 
 def describe_place(sub):
     chat_id = sub["chat_id"]
@@ -584,9 +764,13 @@ async def apply_group(update, chat_id, thread_id, query):
     schedule = get_schedule_or_none(exact["id"])
     if schedule:
         today = kras_today()
-        await deliver_day(update, manager, schedule, sub, today,
-                          header=f"Группа сохранена: {exact['name']}",
-                          keyboard=day_keyboard(today))
+        chat_id, thread_id = dest_key(update)
+        fmt = current_format(manager, chat_id, thread_id) or DEFAULT_FORMAT
+        message = await send_day_message(update.get_bot(), chat_id, thread_id, schedule, sub, today, fmt,
+                                         current_theme(manager, chat_id, thread_id),
+                                         keyboard=day_keyboard(today),
+                                         header=f"Группа сохранена: {exact['name']}")
+        manager.save_message(chat_id, update.effective_user.id, message.message_id)
     else:
         msg = await update.message.reply_text(
             f"<b>Группа сохранена: {esc(exact['name'])}</b>\n\n"
@@ -637,6 +821,10 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text += "Включить: <code>/setchat</code>\n"
 
+    fmt = current_format(manager, chat_id, thread_id)
+    text += f"Формат: {FORMATS[fmt] if fmt else 'спросим при первом запросе'}\n"
+    text += f"Тема картинки: {rn.theme_label(current_theme(manager, chat_id, thread_id))}\n"
+
     health = await asyncio.to_thread(ss.check_site)
     text += (f"\nСайт расписания: {esc(health)}\n"
              f"Источник: {ss.source_label()}\n"
@@ -645,6 +833,17 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        sub.get("group_name") if sub else None)
     msg = await update.message.reply_text(text, parse_mode='HTML')
     manager.save_message(chat_id, update.effective_user.id, msg.message_id)
+
+@with_cleanup
+async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    manager = DatabaseManager()
+    chat_id, thread_id = dest_key(update)
+    msg = await update.message.reply_text(
+        settings_text(manager, chat_id, thread_id),
+        parse_mode='HTML',
+        reply_markup=settings_keyboard(manager, chat_id, thread_id))
+    manager.save_message(chat_id, update.effective_user.id, msg.message_id)
+
 
 @with_cleanup
 async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -676,15 +875,17 @@ async def setchat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         manager.save_message(update.effective_chat.id, sender_id, msg.message_id)
         return
 
-    manager.set_auto(target_chat, target_thread, True)
     thread_info = f"\nТопик: <code>{target_thread}</code>" if target_thread else ""
+    rows = [[
+        InlineKeyboardButton("Картинкой", callback_data="sc|photo|%s|%s" % (target_chat, target_thread)),
+        InlineKeyboardButton("Текстом", callback_data="sc|text|%s|%s" % (target_chat, target_thread))
+    ]]
     msg = await update.message.reply_text(
-        f"<b>Автоотправка включена</b>\n\n"
+        f"<b>Автоотправка</b>\n\n"
         f"Чат: <code>{target_chat}</code>{thread_info}\n"
-        f"Группа: <code>{esc(sub['group_name'])}</code>\n"
-        f"Отправка: после последней пары по Красноярску бот присылает расписание на завтра\n"
-        f"Выключить: <code>/disable_auto</code>" + group_link(sub.get("group_id"), sub.get("group_name")),
-        parse_mode='HTML')
+        f"Группа: <code>{esc(sub['group_name'])}</code>\n\n"
+        f"Как присылать расписание после последней пары?",
+        parse_mode='HTML', reply_markup=InlineKeyboardMarkup(rows))
     manager.save_message(update.effective_chat.id, sender_id, msg.message_id)
 
 @with_cleanup
@@ -699,8 +900,10 @@ async def autosends_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "<b>Автоотправки</b>\n\n"
         for sub in subs:
             status = "включена" if sub.get("auto_enabled") else "выключена"
+            fmt = current_format(manager, sub["chat_id"], sub.get("thread_id") or 0)
+            fmt_text = FORMATS[fmt] if fmt else "текстом"
             text += (f"{sub['id']}. {esc(describe_place(sub))} - "
-                     f"{esc(sub.get('group_name') or 'без группы')} - {status}\n")
+                     f"{esc(sub.get('group_name') or 'без группы')} - {status} - {fmt_text}\n")
         text += ("\nОтключить по номеру: <code>/disable_auto 1</code>\n"
                  "Отключить здешнюю: <code>/disable_auto</code>" + FOOTER_LINK)
     msg = await update.message.reply_text(text, parse_mode='HTML')
@@ -995,6 +1198,105 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     parts = (query.data or "").split("|")
 
+    if parts[0] == "s" and len(parts) >= 3:
+        chat_id = query.message.chat_id
+        thread_id = getattr(query.message, "message_thread_id", None) or 0
+        manager = DatabaseManager()
+        if parts[1] == "f" and parts[2] in FORMATS:
+            manager.set_setting(chat_id, thread_id, "format", parts[2])
+        elif parts[1] == "t" and parts[2] in rn.THEMES:
+            manager.set_setting(chat_id, thread_id, "theme", parts[2])
+        try:
+            await query.edit_message_text(
+                settings_text(manager, chat_id, thread_id),
+                parse_mode="HTML",
+                reply_markup=settings_keyboard(manager, chat_id, thread_id))
+        except BadRequest:
+            pass
+        return
+
+    if parts[0] == "f" and len(parts) >= 5:
+        fmt = parts[1]
+        kind = parts[2]
+        value = parts[3]
+        if fmt not in FORMATS:
+            return
+        try:
+            group_id = int(parts[4])
+        except ValueError:
+            return
+        chat_id = query.message.chat_id
+        thread_id = getattr(query.message, "message_thread_id", None) or 0
+        manager = DatabaseManager()
+        manager.set_setting(chat_id, thread_id, "format", fmt)
+        try:
+            await query.edit_message_text("Формат: " + FORMATS[fmt])
+        except BadRequest:
+            pass
+        schedule = get_schedule_or_none(group_id)
+        if not schedule:
+            await context.bot.send_message(chat_id, "Не удалось получить расписание, попробуйте позже.")
+            return
+        sub = manager.get_subscription(chat_id, thread_id) or {}
+        if int(sub.get("group_id") or 0) != group_id:
+            sub = {"group_id": group_id, "group_name": schedule.get("group_name") or ""}
+        theme_key = current_theme(manager, chat_id, thread_id)
+        try:
+            if kind == "w":
+                monday = monday_of_week() + datetime.timedelta(weeks=int(value))
+                message = await send_week_message(context.bot, chat_id, thread_id, schedule, sub, monday,
+                                                  fmt, theme_key, keyboard=week_keyboard())
+            else:
+                target = datetime.date.fromisoformat(value)
+                message = await send_day_message(context.bot, chat_id, thread_id, schedule, sub, target,
+                                                 fmt, theme_key, keyboard=day_keyboard(target))
+        except Exception as exc:
+            logging.warning("Не удалось отправить расписание после выбора формата: %s", exc)
+            return
+        user_id = query.from_user.id if query.from_user else 0
+        manager.save_message(chat_id, user_id, message.message_id)
+        return
+
+    if parts[0] == "sc" and len(parts) >= 4:
+        fmt = parts[1]
+        if fmt not in FORMATS:
+            return
+        try:
+            target_chat = int(parts[2])
+            target_thread = int(parts[3])
+        except ValueError:
+            return
+        manager = DatabaseManager()
+        sub = manager.get_subscription(target_chat, target_thread)
+        if not sub or not sub.get("group_id"):
+            try:
+                await query.edit_message_text("Для этого чата группа не задана.")
+            except BadRequest:
+                pass
+            return
+        if sub.get("created_by") and sub["created_by"] != query.from_user.id:
+            try:
+                await query.edit_message_text("Включить автоотправку может только тот, кто настроил этот чат.")
+            except BadRequest:
+                pass
+            return
+        manager.set_setting(target_chat, target_thread, "format", fmt)
+        manager.set_auto(target_chat, target_thread, True)
+        thread_info = f"\nТопик: <code>{target_thread}</code>" if target_thread else ""
+        try:
+            await query.edit_message_text(
+                f"<b>Автоотправка включена</b>\n\n"
+                f"Чат: <code>{target_chat}</code>{thread_info}\n"
+                f"Группа: <code>{esc(sub['group_name'])}</code>\n"
+                f"Формат: {FORMATS[fmt]}\n"
+                f"Отправка: после последней пары бот присылает расписание на завтра\n"
+                f"Выключить: <code>/disable_auto</code>"
+                + group_link(sub.get("group_id"), sub.get("group_name")),
+                parse_mode="HTML")
+        except BadRequest:
+            pass
+        return
+
     if parts[0] == "d":
         chat_id = query.message.chat_id
         thread_id = getattr(query.message, "message_thread_id", None) or 0
@@ -1011,11 +1313,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target = datetime.date.fromisoformat(parts[1])
         except (ValueError, IndexError):
             return
-        text = format_schedule(schedule, sub, target)
-        try:
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=day_keyboard(target))
-        except BadRequest:
-            pass
+        await edit_day_view(query, context.bot, manager, chat_id, thread_id, schedule, sub, target)
         return
 
     if parts[0] == "w":
@@ -1035,11 +1333,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (ValueError, IndexError):
             return
         target = monday_of_week() + datetime.timedelta(days=offset * 7)
-        text = format_week(schedule, sub, target)
-        try:
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=week_keyboard())
-        except BadRequest:
-            pass
+        await edit_week_view(query, context.bot, manager, chat_id, thread_id, schedule, sub, target)
         return
 
     if parts[0] == "g":
@@ -1100,11 +1394,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_schedule_to(bot, sub, schedule, date):
-    text = format_schedule(schedule, sub, date)
-    kwargs = {"chat_id": sub["chat_id"], "text": text, "parse_mode": "HTML"}
-    if sub.get("thread_id"):
-        kwargs["message_thread_id"] = sub["thread_id"]
-    await bot.send_message(**kwargs)
+    manager = DatabaseManager()
+    chat_id = sub["chat_id"]
+    thread_id = sub.get("thread_id") or 0
+    fmt = current_format(manager, chat_id, thread_id) or DEFAULT_FORMAT
+    theme_key = current_theme(manager, chat_id, thread_id)
+    await send_day_message(bot, chat_id, thread_id, schedule, sub, date, fmt, theme_key)
 
 def publish_trigger(schedule, day):
     end = ss.last_lesson_end_time(ss.lessons_for(schedule, day))
@@ -1334,6 +1629,7 @@ def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("group", group_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("settings", settings_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("tomorrow", tomorrow_cmd))
     app.add_handler(CommandHandler("day", day_cmd))

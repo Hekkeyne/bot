@@ -11,7 +11,7 @@ FLUSH_INTERVAL = 5
 
 
 def empty_state():
-    return {"subscriptions": [], "teachers": {}, "messages": {}, "sent": {}, "next_sub_id": 1}
+    return {"subscriptions": [], "teachers": {}, "messages": {}, "sent": {}, "settings": {}, "next_sub_id": 1}
 
 
 class StateStore:
@@ -40,14 +40,14 @@ class StateStore:
 
     def load(self):
         remote = self._fetch_remote()
-        if remote and (remote.get("subscriptions") or remote.get("teachers")):
+        if remote and (remote.get("subscriptions") or remote.get("teachers") or remote.get("settings")):
             self._merge(remote)
             self._write_local()
             logging.info("Состояние прочитано из хранилища")
             return
 
         local = self._read_local()
-        if local and (local.get("subscriptions") or local.get("teachers")):
+        if local and (local.get("subscriptions") or local.get("teachers") or local.get("settings")):
             self._merge(local)
             self.dirty = True
             self.flush(force=True)
@@ -130,6 +130,8 @@ class StateStore:
             data["messages"] = {str(key): value for key, value in payload["messages"].items()}
         if isinstance(payload.get("sent"), dict):
             data["sent"] = {str(key): value for key, value in payload["sent"].items()}
+        if isinstance(payload.get("settings"), dict):
+            data["settings"] = {str(key): value for key, value in payload["settings"].items() if isinstance(value, dict)}
         highest = max([int(item.get("id") or 0) for item in data["subscriptions"]] + [0])
         try:
             data["next_sub_id"] = max(1, int(payload.get("next_sub_id") or 1), highest + 1)

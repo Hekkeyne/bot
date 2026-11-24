@@ -2,3 +2,5 @@ python-telegram-bot==22.8
 requests
 pytz
 python-dotenv
+Pillow
+qrcode[pil]
