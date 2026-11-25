@@ -1663,9 +1663,6 @@ try {
         if (mb_strlen($new) < 12) {
             fail('пароль слишком короткий', 400);
         }
-        if ($new === 'danigold4' || mb_strtolower($new) === 'hekkeyne') {
-            fail('этот пароль нельзя использовать', 400);
-        }
 
         $admins = admin_accounts();
         $found = false;
