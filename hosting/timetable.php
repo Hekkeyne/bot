@@ -12,20 +12,38 @@ const WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'satur
 
 date_default_timezone_set('Asia/Krasnoyarsk');
 
-const ADMIN_SESSION_TTL = 604800;
+const ADMIN_SESSION_TTL = 86400;
 const ADMIN_MAX_FAILS = 5;
 const ADMIN_LOCK_SECONDS = 600;
-const ADMIN_LOGIN = 'hekkeyne';
-const ADMIN_NAME = 'hekkeyne';
-const ADMIN_PASSWORD = 'danigold4';
 const BOT_NOTIFY_URL = '';
 const BOT_NOTIFY_TOKEN = '';
+
+function request_is_https(): bool
+{
+    if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+        return true;
+    }
+    if (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') {
+        return true;
+    }
+    return ($_SERVER['SERVER_PORT'] ?? '') === '443';
+}
 
 function send(int $status, string $body, string $type, string $cache = 'no-store'): void
 {
     http_response_code($status);
     header('Content-Type: ' . $type);
     header('Cache-Control: ' . $cache);
+    header('X-Content-Type-Options: nosniff');
+    header('Referrer-Policy: strict-origin-when-cross-origin');
+    header('X-Frame-Options: SAMEORIGIN');
+    header('Permissions-Policy: geolocation=(), microphone=(), camera=()');
+    if (request_is_https()) {
+        header('Strict-Transport-Security: max-age=31536000');
+    }
+    if (stripos($type, 'application/json') !== false) {
+        header("Content-Security-Policy: default-src 'none'; frame-ancestors 'self'");
+    }
     echo $body;
     exit;
 }
@@ -834,7 +852,14 @@ function json_read(string $path): array
     if (!is_file($path)) {
         return [];
     }
-    $raw = @file_get_contents($path);
+    $handle = @fopen($path, 'r');
+    if ($handle === false) {
+        return [];
+    }
+    flock($handle, LOCK_SH);
+    $raw = stream_get_contents($handle);
+    flock($handle, LOCK_UN);
+    fclose($handle);
     $data = json_decode((string) $raw, true);
     return is_array($data) ? $data : [];
 }
@@ -860,16 +885,9 @@ function json_write(string $path, array $data): void
 
 function admin_accounts(): array
 {
-    $path = data_path('admins');
-    $admins = json_read($path);
+    $admins = json_read(data_path('admins'));
     if ($admins === []) {
-        $admins[] = [
-            'login' => ADMIN_LOGIN,
-            'name' => ADMIN_NAME,
-            'hash' => password_hash(ADMIN_PASSWORD, PASSWORD_DEFAULT),
-            'created' => time(),
-        ];
-        json_write($path, $admins);
+        fail('админ не настроен', 503);
     }
     return $admins;
 }
@@ -894,12 +912,13 @@ function current_admin(): ?array
         return null;
     }
     $sessions = json_read(data_path('sessions'));
-    $entry = $sessions[$token] ?? null;
+    $key = hash('sha256', $token);
+    $entry = $sessions[$key] ?? null;
     if (!is_array($entry)) {
         return null;
     }
     if ((int) ($entry['expires'] ?? 0) < time()) {
-        unset($sessions[$token]);
+        unset($sessions[$key]);
         json_write(data_path('sessions'), $sessions);
         return null;
     }
@@ -1089,6 +1108,7 @@ function visible_changes(): array
         if ($itemKey === '' && ($date < $from || $date > $to)) {
             continue;
         }
+        unset($change['updated_by']);
         $result[] = $change;
     }
     usort($result, static fn (array $a, array $b): int => strcmp((string) $a['date'], (string) $b['date']));
@@ -1096,6 +1116,15 @@ function visible_changes(): array
 }
 
 $action = (string) ($_GET['action'] ?? '');
+
+if (!request_is_https()) {
+    $uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
+    $host = (string) ($_SERVER['HTTP_HOST'] ?? '');
+    if ($uri !== '' && stripos($host, 'localhost') === false && strpos($host, '127.0.0.1') === false) {
+        header('Location: https://hekkeyne.ru' . $uri, true, 301);
+        exit;
+    }
+}
 
 if (TOKEN !== '' && (string) ($_GET['token'] ?? '') !== TOKEN) {
     fail('неверный токен', 403);
@@ -1536,10 +1565,19 @@ try {
         }
 
         $ip = (string) ($_SERVER['REMOTE_ADDR'] ?? '');
-        $throttle = json_read(data_path('admin_throttle'));
+        $throttlePath = data_path('admin_throttle');
+        $throttleLock = @fopen($throttlePath . '.lock', 'c');
+        if ($throttleLock !== false) {
+            flock($throttleLock, LOCK_EX);
+        }
+        $throttle = json_read($throttlePath);
         $throttleKey = md5($ip . '|' . mb_strtolower($login));
         $attempt = $throttle[$throttleKey] ?? ['fails' => 0, 'until' => 0];
         if ((int) $attempt['until'] > time()) {
+            if ($throttleLock !== false) {
+                flock($throttleLock, LOCK_UN);
+                fclose($throttleLock);
+            }
             fail('слишком много попыток, подождите', 429);
         }
 
@@ -1558,15 +1596,24 @@ try {
                 $attempt['until'] = time() + ADMIN_LOCK_SECONDS;
             }
             $throttle[$throttleKey] = $attempt;
-            json_write(data_path('admin_throttle'), $throttle);
+            json_write($throttlePath, $throttle);
+            if ($throttleLock !== false) {
+                flock($throttleLock, LOCK_UN);
+                fclose($throttleLock);
+            }
             admin_log(['login' => $login, 'name' => $login], 'login_fail');
             fail('неверный логин или пароль', 403);
         }
 
         unset($throttle[$throttleKey]);
-        json_write(data_path('admin_throttle'), $throttle);
+        json_write($throttlePath, $throttle);
+        if ($throttleLock !== false) {
+            flock($throttleLock, LOCK_UN);
+            fclose($throttleLock);
+        }
 
         $token = bin2hex(random_bytes(32));
+        $sessionKey = hash('sha256', $token);
         $sessions = json_read(data_path('sessions'));
         foreach ($sessions as $key => $entry) {
             if ((int) ($entry['expires'] ?? 0) < time()) {
@@ -1574,7 +1621,7 @@ try {
             }
         }
         $expires = time() + ADMIN_SESSION_TTL;
-        $sessions[$token] = [
+        $sessions[$sessionKey] = [
             'login' => (string) $match['login'],
             'name' => (string) $match['name'],
             'expires' => $expires,
@@ -1602,7 +1649,7 @@ try {
         $token = admin_header_token();
         if ($token !== '') {
             $sessions = json_read(data_path('sessions'));
-            unset($sessions[$token]);
+            unset($sessions[hash('sha256', $token)]);
             json_write(data_path('sessions'), $sessions);
         }
         send(200, '{"ok":true}', 'application/json; charset=utf-8');
@@ -1613,8 +1660,11 @@ try {
         $payload = body_json();
         $old = (string) ($payload['old'] ?? '');
         $new = (string) ($payload['new'] ?? '');
-        if (mb_strlen($new) < 6) {
+        if (mb_strlen($new) < 12) {
             fail('пароль слишком короткий', 400);
+        }
+        if ($new === 'danigold4' || mb_strtolower($new) === 'hekkeyne') {
+            fail('этот пароль нельзя использовать', 400);
         }
 
         $admins = admin_accounts();
@@ -1634,8 +1684,11 @@ try {
             fail('админ не найден', 404);
         }
         json_write(data_path('admins'), $admins);
-        $sessions = json_read(data_path('sessions'));
-        $sessions = [$admin_header_token() => $admin];
+        $currentToken = admin_header_token();
+        $sessions = [];
+        if ($currentToken !== '') {
+            $sessions[hash('sha256', $currentToken)] = $admin;
+        }
         json_write(data_path('sessions'), $sessions);
         admin_log($admin, 'password');
         send(200, '{"ok":true}', 'application/json; charset=utf-8');
@@ -1755,5 +1808,6 @@ try {
 
     fail('неизвестное действие', 400);
 } catch (Throwable $error) {
-    fail($error->getMessage());
+    error_log('timetable: ' . $error->getMessage());
+    fail('внутренняя ошибка', 500);
 }
