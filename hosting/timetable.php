@@ -10,6 +10,17 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
 
 const WEEKDAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
 
+date_default_timezone_set('Asia/Krasnoyarsk');
+
+const ADMIN_SESSION_TTL = 604800;
+const ADMIN_MAX_FAILS = 5;
+const ADMIN_LOCK_SECONDS = 600;
+const ADMIN_LOGIN = 'hekkeyne';
+const ADMIN_NAME = 'hekkeyne';
+const ADMIN_PASSWORD = 'danigold4';
+const BOT_NOTIFY_URL = '';
+const BOT_NOTIFY_TOKEN = '';
+
 function send(int $status, string $body, string $type, string $cache = 'no-store'): void
 {
     http_response_code($status);
@@ -812,6 +823,278 @@ function state_token(): string
     return trim((string) file_get_contents($file));
 }
 
+function data_path(string $name): string
+{
+    $safe = preg_replace('/[^a-z0-9\-]/i', '', $name);
+    return __DIR__ . '/cache/' . ($safe === null ? 'item' : $safe) . '.json';
+}
+
+function json_read(string $path): array
+{
+    if (!is_file($path)) {
+        return [];
+    }
+    $raw = @file_get_contents($path);
+    $data = json_decode((string) $raw, true);
+    return is_array($data) ? $data : [];
+}
+
+function json_write(string $path, array $data): void
+{
+    $dir = dirname($path);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0755, true);
+    }
+    $handle = @fopen($path, 'c+');
+    if ($handle === false) {
+        fail('хранилище недоступно', 500);
+    }
+    flock($handle, LOCK_EX);
+    ftruncate($handle, 0);
+    rewind($handle);
+    fwrite($handle, (string) json_encode($data, JSON_UNESCAPED_UNICODE));
+    fflush($handle);
+    flock($handle, LOCK_UN);
+    fclose($handle);
+}
+
+function admin_accounts(): array
+{
+    $path = data_path('admins');
+    $admins = json_read($path);
+    if ($admins === []) {
+        $admins[] = [
+            'login' => ADMIN_LOGIN,
+            'name' => ADMIN_NAME,
+            'hash' => password_hash(ADMIN_PASSWORD, PASSWORD_DEFAULT),
+            'created' => time(),
+        ];
+        json_write($path, $admins);
+    }
+    return $admins;
+}
+
+function admin_header_token(): string
+{
+    $header = trim((string) ($_SERVER['HTTP_X_ADMIN_TOKEN'] ?? ''));
+    if ($header !== '') {
+        return $header;
+    }
+    $auth = trim((string) ($_SERVER['HTTP_AUTHORIZATION'] ?? ''));
+    if (preg_match('/^Bearer\s+(.+)$/i', $auth, $match)) {
+        return trim($match[1]);
+    }
+    return '';
+}
+
+function current_admin(): ?array
+{
+    $token = admin_header_token();
+    if ($token === '') {
+        return null;
+    }
+    $sessions = json_read(data_path('sessions'));
+    $entry = $sessions[$token] ?? null;
+    if (!is_array($entry)) {
+        return null;
+    }
+    if ((int) ($entry['expires'] ?? 0) < time()) {
+        unset($sessions[$token]);
+        json_write(data_path('sessions'), $sessions);
+        return null;
+    }
+    return $entry;
+}
+
+function require_admin(): array
+{
+    $admin = current_admin();
+    if ($admin === null) {
+        fail('нужен вход', 401);
+    }
+    return $admin;
+}
+
+function body_json(): array
+{
+    $raw = (string) file_get_contents('php://input');
+    $data = json_decode($raw, true);
+    if (!is_array($data)) {
+        fail('нужен JSON-объект', 400);
+    }
+    return $data;
+}
+
+function admin_log(array $admin, string $action, string $key = '', string $note = '', $before = null, $after = null): void
+{
+    $path = data_path('history');
+    $items = json_read($path);
+    $items[] = [
+        'id' => bin2hex(random_bytes(8)),
+        'time' => date('c'),
+        'login' => (string) ($admin['login'] ?? ''),
+        'action' => $action,
+        'key' => $key,
+        'note' => $note,
+        'before' => $before,
+        'after' => $after,
+    ];
+    $extra = count($items) - 200;
+    if ($extra > 0) {
+        $items = array_slice($items, $extra);
+    }
+    json_write($path, $items);
+}
+
+function change_key(array $change): string
+{
+    $scope = (($change['scope'] ?? '') === 'professor') ? 'professor' : 'group';
+    $target = (int) ($change['target_id'] ?? 0);
+    $date = (string) ($change['date'] ?? '');
+    return $scope . '|' . $target . '|' . $date;
+}
+
+function normalize_lesson(array $lesson): array
+{
+    $teachers = [];
+    foreach (($lesson['teachers'] ?? []) as $teacher) {
+        if (!is_array($teacher)) {
+            continue;
+        }
+        $name = clean_text((string) ($teacher['name'] ?? ''));
+        if ($name === '') {
+            continue;
+        }
+        $teachers[] = ['name' => $name, 'id' => isset($teacher['id']) ? (int) $teacher['id'] : null];
+    }
+    if ($teachers === [] && clean_text((string) ($lesson['teacher'] ?? '')) !== '') {
+        $teachers[] = ['name' => clean_text((string) $lesson['teacher']), 'id' => null];
+    }
+    return [
+        'time' => clean_text((string) ($lesson['time'] ?? '')),
+        'subject' => clean_text((string) ($lesson['subject'] ?? '')),
+        'type' => clean_text((string) ($lesson['type'] ?? '')),
+        'teacher' => implode(', ', array_map(static fn (array $item): string => $item['name'], $teachers)),
+        'teachers' => $teachers,
+        'room' => clean_text((string) ($lesson['room'] ?? '')),
+        'subgroup' => clean_text((string) ($lesson['subgroup'] ?? 'все')),
+    ];
+}
+
+function normalize_change(array $change, array $admin): array
+{
+    $scope = (($change['scope'] ?? '') === 'professor') ? 'professor' : 'group';
+    $targetId = (int) ($change['target_id'] ?? 0);
+    $date = clean_text((string) ($change['date'] ?? ''));
+    if ($targetId <= 0 || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $date)) {
+        fail('нужны target_id и дата', 400);
+    }
+
+    $itemKey = clean_text((string) ($change['item_key'] ?? ''));
+    if ($itemKey !== '' && !preg_match('/^[a-z0-9_:.-]{1,80}$/i', $itemKey)) {
+        fail('неверный item_key', 400);
+    }
+
+    $original = [];
+    foreach (($change['original'] ?? []) as $lesson) {
+        if (is_array($lesson)) {
+            $original[] = normalize_lesson($lesson);
+        }
+    }
+
+    $patches = [];
+    foreach (($change['patches'] ?? []) as $patch) {
+        if (!is_array($patch)) {
+            continue;
+        }
+        $op = (string) ($patch['op'] ?? 'replace');
+        if (!in_array($op, ['replace', 'add', 'remove'], true)) {
+            continue;
+        }
+        $fields = [];
+        foreach (($patch['fields'] ?? []) as $field) {
+            if (in_array($field, ['time', 'room', 'teacher', 'subgroup'], true)) {
+                $fields[] = $field;
+            }
+        }
+        $pid = clean_text((string) ($patch['pid'] ?? ''));
+        if ($pid !== '' && !preg_match('/^[a-z0-9-]{1,40}$/i', $pid)) {
+            $pid = '';
+        }
+        $patches[] = [
+            'pid' => $pid,
+            'op' => $op,
+            'index' => (int) ($patch['index'] ?? -1),
+            'old' => is_array($patch['old'] ?? null) ? normalize_lesson($patch['old']) : null,
+            'new' => is_array($patch['new'] ?? null) ? normalize_lesson($patch['new']) : null,
+            'comment' => clean_text((string) ($patch['comment'] ?? '')),
+            'partial' => !empty($patch['partial']),
+            'fields' => $fields,
+        ];
+    }
+
+    return [
+        'key' => $scope . '|' . $targetId . '|' . $date . ($itemKey !== '' ? '|' . $itemKey : ''),
+        'item_key' => $itemKey,
+        'scope' => $scope,
+        'target_id' => $targetId,
+        'target_name' => clean_text((string) ($change['target_name'] ?? '')),
+        'date' => $date,
+        'removed' => !empty($change['removed']),
+        'comment' => clean_text((string) ($change['comment'] ?? '')),
+        'original' => $original,
+        'patches' => $patches,
+        'updated' => time(),
+        'updated_by' => (string) ($admin['name'] ?? $admin['login'] ?? ''),
+    ];
+}
+
+function notify_bot(array $change): void
+{
+    if (BOT_NOTIFY_URL === '') {
+        return;
+    }
+    $body = json_encode(['token' => BOT_NOTIFY_TOKEN, 'change' => $change], JSON_UNESCAPED_UNICODE);
+    $handle = curl_init(BOT_NOTIFY_URL);
+    curl_setopt_array($handle, [
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => $body,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 4,
+        CURLOPT_TIMEOUT => 6,
+    ]);
+    @curl_exec($handle);
+    curl_close($handle);
+}
+
+function visible_changes(): array
+{
+    $changes = json_read(data_path('changes'));
+    $today = new DateTime('today');
+    $monday = (clone $today)->modify('monday this week');
+    if ($monday > $today) {
+        $monday->modify('-7 days');
+    }
+    $last = (clone $monday)->modify('+13 days');
+    $from = $monday->format('Y-m-d');
+    $to = $last->format('Y-m-d');
+    $result = [];
+    foreach ($changes as $key => $change) {
+        if (!is_array($change)) {
+            continue;
+        }
+        $date = (string) ($change['date'] ?? '');
+        $itemKey = (string) ($change['item_key'] ?? '');
+        if ($itemKey === '' && ($date < $from || $date > $to)) {
+            continue;
+        }
+        $result[] = $change;
+    }
+    usort($result, static fn (array $a, array $b): int => strcmp((string) $a['date'], (string) $b['date']));
+    return $result;
+}
+
 $action = (string) ($_GET['action'] ?? '');
 
 if (TOKEN !== '' && (string) ($_GET['token'] ?? '') !== TOKEN) {
@@ -1102,6 +1385,7 @@ try {
     }
 
     if ($action === 'stats') {
+        require_admin();
         $stats = visit_stats();
         $targets = $stats['targets'];
         arsort($targets);
@@ -1196,6 +1480,277 @@ try {
         fclose($handle);
         $raw = trim((string) $raw);
         send(200, $raw === '' ? '{}' : $raw, 'application/json; charset=utf-8');
+    }
+
+    if ($action === 'image') {
+        $url = trim((string) ($_GET['url'] ?? ''));
+        if (!preg_match('#^https?://#i', $url)) {
+            fail('неверная ссылка', 400);
+        }
+        $host = (string) parse_url($url, PHP_URL_HOST);
+        if ($host === '') {
+            fail('неверная ссылка', 400);
+        }
+        $addresses = gethostbynamel($host);
+        if (!$addresses) {
+            fail('не удалось найти хост', 502);
+        }
+        foreach ($addresses as $address) {
+            if (!filter_var($address, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+                fail('запрещённый адрес', 403);
+            }
+        }
+        $result = request($url, [
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 3,
+        ]);
+        if ($result['status'] !== 200) {
+            fail('не удалось загрузить', 502);
+        }
+        $type = header_value($result['headers'], 'Content-Type');
+        if (stripos($type, 'image/') !== 0) {
+            fail('не картинка', 400);
+        }
+        if (strlen($result['body']) > 8 * 1024 * 1024) {
+            fail('слишком большая', 400);
+        }
+        send(200, $result['body'], $type, 'public, max-age=86400');
+    }
+
+    if ($action === 'changes') {
+        $changes = visible_changes();
+        $updated = 0;
+        foreach ($changes as $change) {
+            $updated = max($updated, (int) ($change['updated'] ?? 0));
+        }
+        $body = json_encode(['changes' => $changes, 'updated' => $updated], JSON_UNESCAPED_UNICODE);
+        send(200, $body === false ? '{"changes":[]}' : $body, 'application/json; charset=utf-8');
+    }
+
+    if ($action === 'admin_login') {
+        $payload = body_json();
+        $login = trim((string) ($payload['login'] ?? ''));
+        $password = (string) ($payload['password'] ?? '');
+        if ($login === '' || $password === '') {
+            fail('введите логин и пароль', 400);
+        }
+
+        $ip = (string) ($_SERVER['REMOTE_ADDR'] ?? '');
+        $throttle = json_read(data_path('admin_throttle'));
+        $throttleKey = md5($ip . '|' . mb_strtolower($login));
+        $attempt = $throttle[$throttleKey] ?? ['fails' => 0, 'until' => 0];
+        if ((int) $attempt['until'] > time()) {
+            fail('слишком много попыток, подождите', 429);
+        }
+
+        $match = null;
+        foreach (admin_accounts() as $account) {
+            if (mb_strtolower((string) $account['login']) === mb_strtolower($login)) {
+                $match = $account;
+                break;
+            }
+        }
+
+        if ($match === null || !password_verify($password, (string) $match['hash'])) {
+            $attempt['fails'] = (int) $attempt['fails'] + 1;
+            if ($attempt['fails'] >= ADMIN_MAX_FAILS) {
+                $attempt['fails'] = 0;
+                $attempt['until'] = time() + ADMIN_LOCK_SECONDS;
+            }
+            $throttle[$throttleKey] = $attempt;
+            json_write(data_path('admin_throttle'), $throttle);
+            admin_log(['login' => $login, 'name' => $login], 'login_fail');
+            fail('неверный логин или пароль', 403);
+        }
+
+        unset($throttle[$throttleKey]);
+        json_write(data_path('admin_throttle'), $throttle);
+
+        $token = bin2hex(random_bytes(32));
+        $sessions = json_read(data_path('sessions'));
+        foreach ($sessions as $key => $entry) {
+            if ((int) ($entry['expires'] ?? 0) < time()) {
+                unset($sessions[$key]);
+            }
+        }
+        $expires = time() + ADMIN_SESSION_TTL;
+        $sessions[$token] = [
+            'login' => (string) $match['login'],
+            'name' => (string) $match['name'],
+            'expires' => $expires,
+        ];
+        json_write(data_path('sessions'), $sessions);
+        admin_log($match, 'login');
+
+        $body = json_encode([
+            'ok' => true,
+            'token' => $token,
+            'login' => $match['login'],
+            'name' => $match['name'],
+            'expires' => $expires,
+        ], JSON_UNESCAPED_UNICODE);
+        send(200, $body === false ? '{"ok":true}' : $body, 'application/json; charset=utf-8');
+    }
+
+    if ($action === 'admin_me') {
+        $admin = require_admin();
+        $body = json_encode(['login' => $admin['login'], 'name' => $admin['name'], 'expires' => $admin['expires']], JSON_UNESCAPED_UNICODE);
+        send(200, $body === false ? '{}' : $body, 'application/json; charset=utf-8');
+    }
+
+    if ($action === 'admin_logout') {
+        $token = admin_header_token();
+        if ($token !== '') {
+            $sessions = json_read(data_path('sessions'));
+            unset($sessions[$token]);
+            json_write(data_path('sessions'), $sessions);
+        }
+        send(200, '{"ok":true}', 'application/json; charset=utf-8');
+    }
+
+    if ($action === 'admin_password') {
+        $admin = require_admin();
+        $payload = body_json();
+        $old = (string) ($payload['old'] ?? '');
+        $new = (string) ($payload['new'] ?? '');
+        if (mb_strlen($new) < 6) {
+            fail('пароль слишком короткий', 400);
+        }
+
+        $admins = admin_accounts();
+        $found = false;
+        foreach ($admins as $index => $account) {
+            if (mb_strtolower((string) $account['login']) !== mb_strtolower((string) $admin['login'])) {
+                continue;
+            }
+            if (!password_verify($old, (string) $account['hash'])) {
+                fail('старый пароль неверный', 403);
+            }
+            $admins[$index]['hash'] = password_hash($new, PASSWORD_DEFAULT);
+            $found = true;
+            break;
+        }
+        if (!$found) {
+            fail('админ не найден', 404);
+        }
+        json_write(data_path('admins'), $admins);
+        $sessions = json_read(data_path('sessions'));
+        $sessions = [$admin_header_token() => $admin];
+        json_write(data_path('sessions'), $sessions);
+        admin_log($admin, 'password');
+        send(200, '{"ok":true}', 'application/json; charset=utf-8');
+    }
+
+    if ($action === 'admin_list') {
+        require_admin();
+        $changes = json_read(data_path('changes'));
+        $items = [];
+        foreach ($changes as $change) {
+            if (is_array($change)) {
+                $items[] = $change;
+            }
+        }
+        usort($items, static fn (array $a, array $b): int => strcmp((string) $a['date'], (string) $b['date']));
+        $body = json_encode(['changes' => $items], JSON_UNESCAPED_UNICODE);
+        send(200, $body === false ? '{"changes":[]}' : $body, 'application/json; charset=utf-8');
+    }
+
+    if ($action === 'admin_save') {
+        $admin = require_admin();
+        $payload = body_json();
+        $change = normalize_change((array) ($payload['change'] ?? []), $admin);
+        $changes = json_read(data_path('changes'));
+        $previous = $changes[$change['key']] ?? null;
+        $changes[$change['key']] = $change;
+        json_write(data_path('changes'), $changes);
+        admin_log($admin, 'save', $change['key'], '', $previous, $change);
+        notify_bot($change);
+        $body = json_encode(['ok' => true, 'change' => $change], JSON_UNESCAPED_UNICODE);
+        send(200, $body === false ? '{"ok":true}' : $body, 'application/json; charset=utf-8');
+    }
+
+    if ($action === 'admin_delete') {
+        $admin = require_admin();
+        $payload = body_json();
+        $key = (string) ($payload['key'] ?? '');
+        if ($key === '') {
+            fail('нужен ключ', 400);
+        }
+        $changes = json_read(data_path('changes'));
+        $removed = isset($changes[$key]);
+        $previous = $changes[$key] ?? null;
+        unset($changes[$key]);
+        json_write(data_path('changes'), $changes);
+        admin_log($admin, 'delete', $key, '', $previous, null);
+        if ($removed) {
+            notify_bot(['key' => $key, 'deleted' => true]);
+        }
+        send(200, '{"ok":true}', 'application/json; charset=utf-8');
+    }
+
+    if ($action === 'admin_history') {
+        require_admin();
+        $items = json_read(data_path('history'));
+        $out = [];
+        foreach (array_slice($items, -200) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $actionName = (string) ($item['action'] ?? '');
+            $out[] = [
+                'id' => (string) ($item['id'] ?? ''),
+                'time' => (string) ($item['time'] ?? ''),
+                'login' => (string) ($item['login'] ?? ''),
+                'action' => $actionName,
+                'key' => (string) ($item['key'] ?? ''),
+                'note' => (string) ($item['note'] ?? ''),
+                'can_rollback' => in_array($actionName, ['save', 'delete', 'rollback'], true)
+                    && (array_key_exists('before', $item) || array_key_exists('after', $item)),
+            ];
+        }
+        $out = array_reverse($out);
+        $body = json_encode(['entries' => $out], JSON_UNESCAPED_UNICODE);
+        send(200, $body === false ? '{"entries":[]}' : $body, 'application/json; charset=utf-8');
+    }
+
+    if ($action === 'admin_rollback') {
+        $admin = require_admin();
+        $payload = body_json();
+        $id = (string) ($payload['id'] ?? '');
+        if ($id === '') {
+            fail('нужен id', 400);
+        }
+        $items = json_read(data_path('history'));
+        $entry = null;
+        foreach ($items as $item) {
+            if (is_array($item) && (string) ($item['id'] ?? '') === $id) {
+                $entry = $item;
+                break;
+            }
+        }
+        if ($entry === null) {
+            fail('запись не найдена', 404);
+        }
+        $key = (string) ($entry['key'] ?? '');
+        if ($key === '') {
+            fail('нечего откатывать', 400);
+        }
+        $changes = json_read(data_path('changes'));
+        $current = $changes[$key] ?? null;
+        $before = $entry['before'] ?? null;
+        if (is_array($before)) {
+            $changes[$key] = $before;
+        } else {
+            unset($changes[$key]);
+        }
+        json_write(data_path('changes'), $changes);
+        admin_log($admin, 'rollback', $key, '', $current, $before);
+        if (is_array($before)) {
+            notify_bot($before);
+        } else {
+            notify_bot(['key' => $key, 'deleted' => true]);
+        }
+        send(200, '{"ok":true}', 'application/json; charset=utf-8');
     }
 
     fail('неизвестное действие', 400);

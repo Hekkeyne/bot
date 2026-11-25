@@ -14,6 +14,7 @@ import pytz
 
 import storage
 import schedule_source as ss
+import admin_changes as ac
 import render as rn
 import theme_import as ti
 
@@ -21,7 +22,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("токен неверный")
 
-BUILD = "theme-photo-1 ptb22"
+BUILD = "stale-10 ptb22"
 
 TIMETABLE_URL = "https://timetable.pallada.sibsau.ru/timetable"
 SITE_URL = "https://hekkeyne.ru/timetable/"
@@ -29,7 +30,7 @@ FOOTER_LINK = ("\n\n<a href=\"" + SITE_URL + "\">Полное расписани
                "\n<a href=\"" + TIMETABLE_URL + "\">Полное расписание Паллада СибГУ</a>")
 KRASNOYARSK_TZ = pytz.timezone('Asia/Krasnoyarsk')
 PUBLISH_DELAY_MINUTES = 0
-STALE_PUBLISH_LIMIT = datetime.timedelta(hours=3)
+STALE_PUBLISH_LIMIT = datetime.timedelta(minutes=10)
 GROUP_PROMPT_TTL = 600
 FORMATS = {"photo": "картинкой", "text": "текстом"}
 DEFAULT_FORMAT = "text"
@@ -445,7 +446,9 @@ def teacher_week_keyboard(teacher_id):
 
 def entity_html(item, kind):
     if kind == "professor":
-        links = item.get("teacher_links") or []
+        links = item.get("teacher_links") or item.get("teachers") or []
+        if not links:
+            return esc(item.get("teacher", ""))
         return ", ".join(esc(link.get("name") or "") for link in links)
     return teacher_html(item)
 
@@ -535,29 +538,75 @@ def days_left_text(date):
         return "завтра"
     return "через %d дн." % delta
 
+def applied_exams(schedule):
+    kind = schedule.get("kind") or "group"
+    fallback = datetime.datetime.max.replace(tzinfo=KRASNOYARSK_TZ)
+    items = sorted(schedule.get("exams") or [], key=lambda item: exam_datetime(item) or fallback)
+    changes = ac.fetch()
+    result = []
+    for index, exam in enumerate(items):
+        iso = ac.iso_date(exam.get("date"))
+        change = ac.item_change(changes, kind, kind, schedule.get("group_id"), iso, "exams", index)
+        patch = (change.get("patches") or [None])[0] if change else None
+        if patch and patch.get("op") == "remove":
+            result.append({"old": exam, "new": None, "comment": patch.get("comment") or ""})
+        elif patch and patch.get("op") == "replace":
+            result.append({"old": exam, "new": patch.get("new") or exam, "comment": patch.get("comment") or ""})
+        else:
+            result.append({"old": None, "new": exam, "comment": ""})
+    return result
+
+
+def exam_left(exam):
+    try:
+        date = datetime.datetime.strptime(exam["date"], "%d.%m.%Y").date()
+    except (ValueError, KeyError):
+        return ""
+    return days_left_text(date)
+
+
+def struck_exam(exam):
+    return (f"<s>{esc(exam.get('subject'))} ({esc(exam.get('type'))})</s>\n"
+            f"<s>{esc(exam.get('date'))} в {esc(exam.get('time'))}</s>\n"
+            f"<s>{teacher_html(exam)}</s>\n"
+            f"<s>{esc(exam.get('room'))}</s>\n")
+
+
+def format_exam(exam):
+    return (f"<b>{esc(exam.get('subject'))}</b> ({esc(exam.get('type'))})\n"
+            f"{esc(exam.get('date'))} в {esc(exam.get('time'))}, {exam_left(exam)}\n"
+            f"{teacher_html(exam)}\n"
+            f"{esc(exam.get('room'))}\n")
+
+
 def format_exams_list(schedule, sub):
-    exams = schedule.get("exams") or []
+    items = applied_exams(schedule)
     text = f"<b>Сессия: {esc(sub['group_name'])}</b>\n\n"
-    if not exams:
+    if not items:
         return text + "Экзамены пока не опубликованы." + group_link(sub.get("group_id"), sub.get("group_name"))
 
-    fallback = datetime.datetime.max.replace(tzinfo=KRASNOYARSK_TZ)
-    for exam in sorted(exams, key=lambda item: exam_datetime(item) or fallback):
-        try:
-            date = datetime.datetime.strptime(exam["date"], "%d.%m.%Y").date()
-            left = days_left_text(date)
-        except ValueError:
-            left = ""
-        text += (f"<b>{esc(exam['subject'])}</b> ({esc(exam['type'])})\n"
-                 f"{esc(exam['date'])} в {esc(exam['time'])}, {left}\n"
-                 f"{teacher_html(exam)}\n"
-                 f"{esc(exam['room'])}\n\n")
+    for item in items:
+        old = item.get("old")
+        new = item.get("new")
+        if old and new:
+            text += struck_exam(old)
+            text += format_exam(new)
+        elif old:
+            text += struck_exam(old)
+        elif new:
+            text += format_exam(new)
+        if item.get("comment"):
+            text += change_comment_html(item["comment"]) + "\n"
+        text += "\n"
     return text.strip() + group_link(sub.get("group_id"), sub.get("group_name"))
 
 def nearest_exam_info(schedule):
     now = datetime.datetime.now(KRASNOYARSK_TZ)
     upcoming = []
-    for exam in schedule.get("exams") or []:
+    for item in applied_exams(schedule):
+        exam = item.get("new")
+        if not exam:
+            continue
         moment = exam_datetime(exam)
         if moment and moment > now:
             upcoming.append((moment, exam))
@@ -1235,16 +1284,43 @@ def consult_key(item):
         return datetime.datetime.max
 
 
+def consult_teachers(item):
+    return ", ".join(esc(person.get("name") or "") for person in (item.get("teachers") or []) if person.get("name"))
+
+
+def format_consult(item):
+    return (f"<b>{esc(item.get('date'))}</b> в {esc(item.get('time'))}\n"
+            f"{consult_teachers(item)}\n"
+            f"{esc(item.get('room'))}\n")
+
+
+def struck_consult(item):
+    return (f"<s>{esc(item.get('date'))} в {esc(item.get('time'))}</s>\n"
+            f"<s>{consult_teachers(item)}</s>\n"
+            f"<s>{esc(item.get('room'))}</s>\n")
+
+
 def format_consults(items, sub):
     text = f"<b>Консультации: {esc(sub['group_name'])}</b>\n\n"
     link = group_link(sub.get("group_id"), sub.get("group_name"))
-    if not items:
+    ordered = sorted(items, key=consult_key)
+    if not ordered:
         return text + "Пока не опубликованы. Появятся, когда вуз их выложит." + link
-    for item in sorted(items, key=consult_key):
-        teachers = ", ".join(esc(person.get("name") or "") for person in (item.get("teachers") or []) if person.get("name"))
-        text += (f"<b>{esc(item.get('date'))}</b> в {esc(item.get('time'))}\n"
-                 f"{teachers}\n"
-                 f"{esc(item.get('room'))}\n\n")
+    changes = ac.fetch()
+    for index, item in enumerate(ordered):
+        iso = ac.iso_date(item.get("date"))
+        change = ac.item_change(changes, "group", "group", sub.get("group_id"), iso, "consults", index)
+        patch = (change.get("patches") or [None])[0] if change else None
+        if patch and patch.get("op") == "remove":
+            text += struck_consult(item)
+        elif patch and patch.get("op") == "replace":
+            text += struck_consult(item)
+            text += format_consult(patch.get("new") or item)
+        else:
+            text += format_consult(item)
+        if patch and patch.get("comment"):
+            text += change_comment_html(patch["comment"]) + "\n"
+        text += "\n"
     return text.strip() + link
 
 
@@ -1669,40 +1745,135 @@ def lesson_block(lesson, kind="group"):
             f"{entity_html(lesson, kind)}\n"
             f"{esc(lesson['room'])}\n\n")
 
+def change_comment_html(text):
+    return f"<b>!</b> {esc(text)}" if text else ""
+
+
+def struck_block(lesson, kind):
+    if not lesson:
+        return ""
+    lines = [f"<s>{esc(lesson.get('subject'))} ({esc(lesson.get('type'))})</s>"]
+    who = entity_html(lesson, kind)
+    if who:
+        lines.append(f"<s>{who}</s>")
+    if lesson.get("room"):
+        lines.append(f"<s>{esc(lesson.get('room'))}</s>")
+    return "\n".join(lines) + "\n"
+
+
+def partial_was(lesson, fields):
+    parts = []
+    if "time" in fields and lesson.get("time"):
+        parts.append(esc(lesson["time"]))
+    if "room" in fields and lesson.get("room"):
+        parts.append(esc(lesson["room"]))
+    if "teacher" in fields and lesson.get("teacher"):
+        parts.append(esc(lesson["teacher"]))
+    if "subgroup" in fields and lesson.get("subgroup"):
+        parts.append(esc(lesson["subgroup"]))
+    return f"<i>было:</i> <s>{', '.join(parts)}</s>\n" if parts else ""
+
+
+def lesson_prefix(lesson):
+    subgroup = (lesson or {}).get("subgroup")
+    if subgroup and subgroup != "все":
+        return f"{esc(subgroup)}: "
+    return ""
+
+
+def format_day_entry(entry, kind):
+    op = entry.get("op")
+    old = entry.get("old")
+    new = entry.get("new")
+    text = ""
+    if op == "normal":
+        return lesson_prefix(new) + lesson_block(new, kind)
+    if op == "add":
+        text += "новая пара\n" + lesson_prefix(new) + lesson_block(new, kind)
+    elif op == "remove":
+        text += struck_block(old, kind)
+    elif entry.get("partial"):
+        text += lesson_prefix(new) + lesson_block(new, kind)
+        text += partial_was(old or {}, entry.get("fields") or [])
+    else:
+        text += struck_block(old, kind)
+        text += lesson_prefix(new) + lesson_block(new, kind)
+    if entry.get("comment"):
+        text += change_comment_html(entry["comment"]) + "\n\n"
+    return text
+
+
 def format_schedule(schedule, sub, date, kind=None):
     kind = kind or schedule.get("kind") or "group"
     weekday = get_day_name(date)
     week_no = ss.week_number_for(date, schedule)
-    lessons = ss.lessons_for(schedule, date)
+    view = ac.day_view(schedule, date, kind)
     footer = group_link(sub.get("group_id"), sub.get("group_name"))
 
     label = "Преподаватель" if kind == "professor" else "Группа"
     header = (f"Расписание на {get_russian_day(weekday)} ({date.strftime('%d.%m.%Y')})\n"
               f"{label}: {esc(sub['group_name'])}\n"
               f"Неделя: {week_no}-я\n")
-    if not lessons:
+    if view["removed"]:
+        text = header + "\n<s>День отменён</s>\n"
+        if view["comment"]:
+            text += change_comment_html(view["comment"]) + "\n"
+        return text.strip() + footer
+    if not view["entries"]:
         return header + "\nВыходной! Пар нет." + footer
 
-    time_groups = {}
-    for lesson in lessons:
-        time_groups.setdefault(lesson["time"], []).append(lesson)
+    text = header + "\n"
+    for time_slot, entries in ac.slots(view):
+        text += f"{time_slot}\n"
+        for entry in entries:
+            text += format_day_entry(entry, kind)
+        text += "\n"
+    if view["comment"]:
+        text += change_comment_html(view["comment"]) + "\n"
+    return text.strip() + footer
 
-    msg = header + "\n"
-    for time_slot in sorted(time_groups.keys(), key=lambda t: t.split("-")[0]):
-        group = time_groups[time_slot]
-        common = next((l for l in group if l["subgroup"] == "все"), None)
-        msg += f"{time_slot}\n"
-        if common:
-            msg += lesson_block(common, kind)
-        else:
-            for i, lesson in enumerate(group):
-                if i > 0:
-                    msg += "\n"
-                msg += f"{lesson['subgroup']}:\n"
-                msg += lesson_block(lesson, kind)
-            msg += "\n"
 
-    return msg.strip() + footer
+def format_week_entry(time_slot, entry, kind):
+    op = entry.get("op")
+    old = entry.get("old")
+    new = entry.get("new")
+    if op == "normal":
+        line = f"{time_slot} | {lesson_prefix(new)}<b>{esc(new.get('subject'))}</b> ({esc(new.get('type'))})"
+        if kind == "professor":
+            who = entity_html(new, kind)
+            if who:
+                line += ", " + who
+            if new.get("room"):
+                line += ", " + esc(new["room"])
+        return line + "\n"
+    if op == "add":
+        return f"{time_slot} | новая пара: <b>{esc(new.get('subject'))}</b> ({esc(new.get('type'))})\n"
+    if op == "remove":
+        line = f"{time_slot} | <s>{esc(old.get('subject'))} ({esc(old.get('type'))})</s>\n"
+        if entry.get("comment"):
+            line += f"  {change_comment_html(entry['comment'])}\n"
+        return line
+    if entry.get("partial"):
+        line = f"{time_slot} | {lesson_prefix(new)}<b>{esc(new.get('subject'))}</b> ({esc(new.get('type'))})"
+        fields = entry.get("fields") or []
+        parts = partial_was(old or {}, fields).strip()
+        if parts:
+            line += "\n  " + parts
+        if entry.get("comment"):
+            line += f"  {change_comment_html(entry['comment'])}\n"
+        return line + "\n"
+    line = f"{time_slot} | <s>{esc(old.get('subject'))} ({esc(old.get('type'))})</s>\n"
+    line += f"  <b>{esc(new.get('subject'))}</b> ({esc(new.get('type'))})"
+    if kind == "professor":
+        who = entity_html(new, kind)
+        if who:
+            line += ", " + who
+        if new.get("room"):
+            line += ", " + esc(new["room"])
+    if entry.get("comment"):
+        line += f"  {change_comment_html(entry['comment'])}"
+    return line + "\n"
+
 
 def format_week(schedule, sub, today, kind=None):
     kind = kind or schedule.get("kind") or "group"
@@ -1711,42 +1882,24 @@ def format_week(schedule, sub, today, kind=None):
     text = f"<b>{title}</b>\n{esc(sub['group_name'])}\n\n"
     for i in range(7):
         current = monday + datetime.timedelta(days=i)
-        lessons = ss.lessons_for(schedule, current)
+        view = ac.day_view(schedule, current, kind)
         day_ru = get_russian_day(get_day_name(current))
-        if not lessons:
+        if view["removed"]:
+            text += f"<b>{day_ru}</b>: <s>день отменён</s>\n"
+            if view["comment"]:
+                text += f"  {change_comment_html(view['comment'])}\n"
+            text += "\n"
+            continue
+        if not view["entries"]:
             text += f"<b>{day_ru}</b>: Выходной\n\n"
             continue
-
-        time_groups = {}
-        for lesson in lessons:
-            time_groups.setdefault(lesson["time"], []).append(lesson)
-
         text += f"<b>{day_ru}</b> ({current.strftime('%d.%m')}):\n"
-        for time_slot in sorted(time_groups.keys(), key=lambda t: t.split("-")[0]):
-            group = time_groups[time_slot]
-            common = next((l for l in group if l["subgroup"] == "все"), None)
-            if common:
-                line = f"{time_slot} | <b>{esc(common['subject'])}</b> ({esc(common['type'])})"
-                if kind == "professor":
-                    who = entity_html(common, kind)
-                    if who:
-                        line += ", " + who
-                    if common.get("room"):
-                        line += ", " + esc(common["room"])
-                text += line + "\n"
-            else:
-                for lesson in group:
-                    line = (f"{time_slot} | {esc(lesson['subgroup'])}: "
-                            f"<b>{esc(lesson['subject'])}</b> ({esc(lesson['type'])})")
-                    if kind == "professor":
-                        who = entity_html(lesson, kind)
-                        if who:
-                            line += ", " + who
-                        if lesson.get("room"):
-                            line += ", " + esc(lesson["room"])
-                    text += line + "\n"
+        for time_slot, entries in ac.slots(view):
+            for entry in entries:
+                text += format_week_entry(time_slot, entry, kind)
+        if view["comment"]:
+            text += f"  {change_comment_html(view['comment'])}\n"
         text += "\n"
-
     text += f"Неделя: {ss.week_number_for(today, schedule)}-я"
     return text + group_link(sub.get("group_id"), sub.get("group_name"))
 

@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from qrcode.constants import ERROR_CORRECT_M
 
 import schedule_source as ss
+import admin_changes as ac
 
 FONT_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
 FONT_REGULAR = os.path.join(FONT_DIR, "PT_Sans-Web-Regular.ttf")
@@ -337,36 +338,179 @@ def qr_url(sub):
 
 def render_day(schedule, sub, date, theme_key="default", today=None, mode="light", custom=None):
     th = theme(theme_key, mode, custom)
+    kind = schedule.get("kind") or "group"
+    view = ac.day_view(schedule, date, kind)
+    slots = ac.slots(view)
     width = 1800
     pad = 60
     inner = width - pad * 2
     time_width = 156
     part_x = pad + 28 + time_width
     part_width = inner - time_width - 28
-    lessons = ss.lessons_for(schedule, date)
+    strike = "#f87171" if mode == "dark" else "#dc2626"
+    added = "#4ade80" if mode == "dark" else "#16a34a"
     measure = ImageDraw.Draw(Image.new("RGB", (10, 10), th["bg"]))
 
-    slots = []
-    grouped = {}
-    for lesson in lessons:
-        grouped.setdefault(lesson.get("time", ""), []).append(lesson)
-    for key in sorted(grouped.keys(), key=lambda value: value.split("-")[0]):
-        slots.append((key, grouped[key]))
+    def teachers_line(item):
+        return ", ".join(person.get("name") or "" for person in (item.get("teachers") or []) if person.get("name"))
 
-    def part_height(item):
+    def lesson_height(item, subgroup_changed=False):
         height = len(wrap(measure, item.get("subject", ""), font(30, True), part_width)) * 38 + 34
+        if (item.get("subgroup") and item["subgroup"] != "все") or subgroup_changed:
+            height += 30
         if item.get("room"):
             height += 34
-        if teachers_of(item):
+        if teachers_line(item):
             height += 32
         return height
 
+    def old_height(item):
+        height = len(wrap(measure, item.get("subject", ""), font(24, True), part_width)) * 30 + 8
+        if item.get("subgroup") and item["subgroup"] != "все":
+            height += 28
+        meta = ", ".join(part for part in (item.get("type"), item.get("room")) if part)
+        height += len(wrap(measure, meta, font(20), part_width)) * 26
+        if teachers_line(item):
+            height += 26
+        return height + 10
+
+    def comment_height(text):
+        return len(wrap(measure, text, font(20), part_width - 20)) * 28 + 16 if text else 0
+
+    def entry_height(entry):
+        op = entry["op"]
+        old = entry.get("old")
+        new = entry.get("new")
+        if op == "normal":
+            return lesson_height(new)
+        if op == "add":
+            return lesson_height(new) + 30
+        if op == "remove":
+            return old_height(old) + comment_height(entry.get("comment"))
+        if entry.get("partial"):
+            fields = entry.get("fields") or []
+            height = lesson_height(new, "subgroup" in fields)
+            if any(field != "subgroup" for field in fields):
+                height += 30
+            return height + comment_height(entry.get("comment"))
+        return old_height(old) + lesson_height(new) + comment_height(entry.get("comment"))
+
+    def strike_text(target, x, y, text, face, color):
+        line_width = text_width(target, text, face)
+        size = getattr(face, "size", 20)
+        target.line([x, y + size * 0.62, x + line_width, y + size * 0.62], fill=color, width=max(1, int(size / 14)))
+
+    def draw_lesson(item, px, py, subgroup_changed=False, old_subgroup=""):
+        subgroup = item.get("subgroup") if item.get("subgroup") and item["subgroup"] != "все" else ""
+        if subgroup_changed:
+            old = old_subgroup or "все"
+            draw_text(draw, px, py, old, font(22), strike)
+            strike_text(draw, px, py, old, font(22), strike)
+            if subgroup:
+                draw_text(draw, px + text_width(draw, old, font(22)) + 10, py, subgroup, font(22), th["ink"])
+            py += 30
+        elif subgroup:
+            draw_text(draw, px, py, subgroup, font(22), th["muted"])
+            py += 30
+        lines = wrap(draw, item.get("subject", ""), font(30, True), part_width)
+        for line in lines:
+            draw_text(draw, px, py, line, font(30, True), th["ink"])
+            py += 38
+        draw_text(draw, px, py, item.get("type", ""), font(24), th["muted"])
+        py += 34
+        if item.get("room"):
+            draw_text(draw, px, py, item["room"], font(24), th["building"])
+            py += 34
+        teachers = teachers_line(item)
+        if teachers:
+            draw_text(draw, px, py, teachers, font(22), th["muted"])
+            py += 32
+        return py + 12
+
+    def draw_old(item, px, py):
+        if item.get("subgroup") and item["subgroup"] != "все":
+            draw_text(draw, px, py, item["subgroup"], font(20), strike)
+            strike_text(draw, px, py, item["subgroup"], font(20), strike)
+            py += 28
+        for line in wrap(draw, item.get("subject", ""), font(24, True), part_width):
+            draw_text(draw, px, py, line, font(24, True), strike)
+            strike_text(draw, px, py, line, font(24, True), strike)
+            py += 30
+        meta = ", ".join(part for part in (item.get("type"), item.get("room")) if part)
+        for line in wrap(draw, meta, font(20), part_width):
+            draw_text(draw, px, py, line, font(20), strike)
+            strike_text(draw, px, py, line, font(20), strike)
+            py += 26
+        teachers = teachers_line(item)
+        if teachers:
+            draw_text(draw, px, py, teachers, font(20), strike)
+            strike_text(draw, px, py, teachers, font(20), strike)
+            py += 26
+        return py + 10
+
+    def draw_comment(text, x, y):
+        if not text:
+            return y
+        lines = wrap(draw, text, font(20), part_width - 20)
+        height = len(lines) * 28 + 16
+        draw.rounded_rectangle([x, y, x + part_width, y + height], radius=int(th.get("radius") or 0),
+                               fill=th["panel"], outline=th["line"], width=2)
+        py = y + 8
+        for line in lines:
+            draw_text(draw, x + 10, py, line, font(20), th["ink"])
+            py += 28
+        return y + height
+
+    def draw_entry(entry, px, py):
+        op = entry["op"]
+        old = entry.get("old")
+        new = entry.get("new")
+        if op == "normal":
+            return draw_lesson(new, px, py)
+        if op == "add":
+            draw_text(draw, px, py, "новая пара", font(22, True), added)
+            py += 30
+            return draw_lesson(new, px, py)
+        if op == "remove":
+            py = draw_old(old, px, py)
+            if entry.get("comment"):
+                py = draw_comment(entry["comment"], px, py) + 10
+            return py
+        if entry.get("partial"):
+            fields = entry.get("fields") or []
+            py = draw_lesson(new, px, py, "subgroup" in fields, (old or {}).get("subgroup") or "")
+            parts = []
+            if "time" in fields and old.get("time"):
+                parts.append(old["time"])
+            if "room" in fields and old.get("room"):
+                parts.append(old["room"])
+            if "teacher" in fields and old.get("teacher"):
+                parts.append(old["teacher"])
+            if parts:
+                text = "было: " + ", ".join(parts)
+                draw_text(draw, px, py, text, font(20), strike)
+                strike_text(draw, px, py, text, font(20), strike)
+                py += 30
+            if entry.get("comment"):
+                py = draw_comment(entry["comment"], px, py) + 10
+            return py
+        py = draw_old(old, px, py)
+        py = draw_lesson(new, px, py)
+        if entry.get("comment"):
+            py = draw_comment(entry["comment"], px, py) + 10
+        return py
+
     height = pad + 108 + 68
-    for _, items in slots:
-        right = sum(part_height(item) + 12 for item in items)
-        height += max(44, right) + 44 + 20
-    if not slots:
+    if view["removed"]:
+        height += 120 + comment_height(view["comment"])
+    elif not slots:
         height += 84
+    else:
+        for _, entries in slots:
+            right = sum(entry_height(entry) + 12 for entry in entries)
+            height += max(44, right) + 44 + 20
+    if view["comment"] and not view["removed"]:
+        height += comment_height(view["comment"]) + 20
     height += 28
     footer_top = height - 12
     height += 32
@@ -383,62 +527,64 @@ def render_day(schedule, sub, date, theme_key="default", today=None, mode="light
     is_today = date == (today or datetime.date.today())
     day_color = th["today"] if is_today else th["ink"]
     draw.rounded_rectangle([pad, y, pad + 480, y + 52], radius=int(th.get("radius") or 0), fill=day_color)
-    draw_text(draw, pad + 20, y + 12, ss.WEEKDAYS_RU[ss.WEEKDAYS[date.weekday()]], font(26, True), th["on_ink"])
+    day_name = ss.WEEKDAYS_RU[ss.WEEKDAYS[date.weekday()]]
+    draw_text(draw, pad + 20, y + 12, day_name, font(26, True), th["on_ink"])
+    if view["removed"]:
+        strike_text(draw, pad + 20, y + 12, day_name, font(26, True), strike)
     draw_text(draw, pad + 300, y + 16, date.strftime("%d.%m"), font(22), th["on_ink"])
     draw.line([pad, y + 52, width - pad, y + 52], fill=th["line"], width=2)
     y += 68
 
-    if not slots:
+    if view["removed"]:
+        card(draw, pad, y, inner, 64, th, image)
+        draw_text(draw, pad + 28, y + 18, "пар нет", font(26), th["muted"])
+        y += 84
+        if view["comment"]:
+            y = draw_comment(view["comment"], pad + 28, y) + 20
+    elif not slots:
         card(draw, pad, y, inner, 64, th, image)
         draw_text(draw, pad + 28, y + 18, "нет пар", font(26), th["muted"])
         y += 84
     else:
-        for time_slot, items in slots:
-            right = sum(part_height(item) + 12 for item in items)
+        for time_slot, entries in slots:
+            right = sum(entry_height(entry) + 12 for entry in entries)
             card_height = max(44, right) + 44
             card(draw, pad, y, inner, card_height, th, image)
             parts = str(time_slot or "").split("-")
             draw_text(draw, pad + 28, y + 24, parts[0] if parts else "", font(24, True), th["muted"])
             draw_text(draw, pad + 28, y + 54, parts[1] if len(parts) > 1 else "", font(22), th["muted"])
             py = y + 24
-            for item in items:
-                lines = wrap(draw, item.get("subject", ""), font(30, True), part_width)
-                for line in lines:
-                    draw_text(draw, part_x, py, line, font(30, True), th["ink"])
-                    py += 38
-                draw_text(draw, part_x, py, item.get("type", ""), font(24), th["muted"])
-                py += 34
-                if item.get("room"):
-                    draw_text(draw, part_x, py, item["room"], font(24), th["building"])
-                    py += 34
-                teachers = teachers_of(item)
-                if teachers:
-                    draw_text(draw, part_x, py, teachers, font(22), th["muted"])
-                    py += 32
-                py += 12
+            for entry in entries:
+                py = draw_entry(entry, part_x, py)
             y += card_height + 20
-        y += 28
+        if view["comment"]:
+            y = draw_comment(view["comment"], pad + 28, y + 8) + 20
+        y += 8
 
     draw_text(draw, pad, footer_top, "hekkeyne.ru/timetable", font(22), th["muted"])
     output = io.BytesIO()
     image.save(output, format="PNG")
     return output.getvalue()
 
-
 def render_week(schedule, sub, monday, theme_key="default", mode="light", custom=None):
     th = theme(theme_key, mode, custom)
+    kind = schedule.get("kind") or "group"
     width = 3000
     pad = 96
     gap = 32
     col_width = (width - pad * 2 - gap * 3) / 4
     text_width_value = col_width - 40
     days = [monday + datetime.timedelta(days=index) for index in range(7)]
-
+    strike = "#f87171" if mode == "dark" else "#dc2626"
+    added = "#4ade80" if mode == "dark" else "#16a34a"
     measure = ImageDraw.Draw(Image.new("RGB", (10, 10), th["bg"]))
 
-    def lesson_height(item):
+    def teachers_of(item):
+        return ", ".join(person.get("name") or "" for person in (item.get("teachers") or []) if person.get("name"))
+
+    def lesson_height(item, subgroup_changed=False):
         height = len(wrap(measure, item.get("subject", ""), font(24, True), text_width_value)) * 28
-        if item.get("subgroup") and item["subgroup"] != "все":
+        if (item.get("subgroup") and item["subgroup"] != "все") or subgroup_changed:
             height += 22
         meta = ", ".join(part for part in (item.get("type"), item.get("room")) if part)
         height += len(wrap(measure, meta, font(18), text_width_value)) * 22
@@ -446,57 +592,172 @@ def render_week(schedule, sub, monday, theme_key="default", mode="light", custom
             height += 22
         return height + 8
 
+    def old_height(item):
+        height = len(wrap(measure, item.get("subject", ""), font(20, True), text_width_value)) * 24
+        if item.get("subgroup") and item["subgroup"] != "все":
+            height += 18
+        meta = ", ".join(part for part in (item.get("type"), item.get("room")) if part)
+        height += len(wrap(measure, meta, font(16), text_width_value)) * 18
+        if teachers_of(item):
+            height += 18
+        return height + 6
+
+    def comment_height(text):
+        return len(wrap(measure, text, font(16), text_width_value)) * 18 + 6 if text else 0
+
+    def entry_height(entry):
+        op = entry["op"]
+        old = entry.get("old")
+        new = entry.get("new")
+        if op == "normal":
+            return lesson_height(new)
+        if op == "add":
+            return lesson_height(new) + 18
+        if op == "remove":
+            return old_height(old) + comment_height(entry.get("comment"))
+        if entry.get("partial"):
+            fields = entry.get("fields") or []
+            height = lesson_height(new, "subgroup" in fields)
+            if any(field != "subgroup" for field in fields):
+                height += 18
+            return height + comment_height(entry.get("comment"))
+        return old_height(old) + lesson_height(new) + comment_height(entry.get("comment"))
+
+    def strike_line(target, x, y, text, face, color):
+        line_width = text_width(target, text, face)
+        size = getattr(face, "size", 18)
+        target.line([x, y + size * 0.62, x + line_width, y + size * 0.62], fill=color, width=max(1, int(size / 16)))
+
+    def draw_item(item, x, py, subgroup_changed=False, old_subgroup=""):
+        subgroup = item.get("subgroup") if item.get("subgroup") and item["subgroup"] != "все" else ""
+        if subgroup_changed:
+            old = old_subgroup or "все"
+            draw_text(draw, x, py, old, font(18), strike)
+            strike_line(draw, x, py, old, font(18), strike)
+            if subgroup:
+                draw_text(draw, x + text_width(draw, old, font(18)) + 8, py, subgroup, font(18), th["ink"])
+            py += 22
+        elif subgroup:
+            draw_text(draw, x, py, subgroup, font(18), th["muted"])
+            py += 22
+        for line in wrap(draw, item.get("subject", ""), font(24, True), text_width_value):
+            draw_text(draw, x, py, line, font(24, True), th["ink"])
+            py += 28
+        meta = ", ".join(part for part in (item.get("type"), item.get("room")) if part)
+        for line in wrap(draw, meta, font(18), text_width_value):
+            draw_text(draw, x, py, line, font(18), th["muted"])
+            py += 22
+        teachers = teachers_of(item)
+        if teachers:
+            draw_text(draw, x, py, teachers, font(16), th["muted"])
+            py += 22
+        return py + 8
+
+    def draw_old(item, x, py):
+        if item.get("subgroup") and item["subgroup"] != "все":
+            draw_text(draw, x, py, item["subgroup"], font(16), strike)
+            strike_line(draw, x, py, item["subgroup"], font(16), strike)
+            py += 18
+        for line in wrap(draw, item.get("subject", ""), font(20, True), text_width_value):
+            draw_text(draw, x, py, line, font(20, True), strike)
+            strike_line(draw, x, py, line, font(20, True), strike)
+            py += 24
+        meta = ", ".join(part for part in (item.get("type"), item.get("room")) if part)
+        for line in wrap(draw, meta, font(16), text_width_value):
+            draw_text(draw, x, py, line, font(16), strike)
+            strike_line(draw, x, py, line, font(16), strike)
+            py += 18
+        teachers = teachers_of(item)
+        if teachers:
+            draw_text(draw, x, py, teachers, font(16), strike)
+            strike_line(draw, x, py, teachers, font(16), strike)
+            py += 18
+        return py + 6
+
+    def draw_comment(text, x, py):
+        if not text:
+            return py
+        for line in wrap(draw, text, font(16), text_width_value):
+            draw_text(draw, x, py, line, font(16), th["ink"])
+            py += 18
+        return py + 4
+
+    def draw_entry(entry, x, py):
+        op = entry["op"]
+        old = entry.get("old")
+        new = entry.get("new")
+        if op == "normal":
+            return draw_item(new, x, py)
+        if op == "add":
+            draw_text(draw, x, py, "новая пара", font(16, True), added)
+            py += 18
+            return draw_item(new, x, py)
+        if op == "remove":
+            py = draw_old(old, x, py)
+            return draw_comment(entry.get("comment"), x, py)
+        if entry.get("partial"):
+            fields = entry.get("fields") or []
+            py = draw_item(new, x, py, "subgroup" in fields, (old or {}).get("subgroup") or "")
+            parts = []
+            if "time" in fields and old.get("time"):
+                parts.append(old["time"])
+            if "room" in fields and old.get("room"):
+                parts.append(old["room"])
+            if "teacher" in fields and old.get("teacher"):
+                parts.append(old["teacher"])
+            if parts:
+                text = "было: " + ", ".join(parts)
+                draw_text(draw, x, py, text, font(16), strike)
+                strike_line(draw, x, py, text, font(16), strike)
+                py += 18
+            return draw_comment(entry.get("comment"), x, py)
+        py = draw_old(old, x, py)
+        py = draw_item(new, x, py)
+        return draw_comment(entry.get("comment"), x, py)
+
     def day_height(day):
-        slots = []
-        grouped = {}
-        for lesson in ss.lessons_for(schedule, day):
-            grouped.setdefault(lesson.get("time", ""), []).append(lesson)
-        for key in sorted(grouped.keys(), key=lambda value: value.split("-")[0]):
-            slots.append((key, grouped[key]))
-        height = 76
+        view = ac.day_view(schedule, day, kind)
+        height = 38
+        if view["removed"]:
+            return height + 26 + comment_height(view["comment"])
+        slots = ac.slots(view)
         if not slots:
-            return height + 52
-        for _, items in slots:
-            height += 26
-            for item in items:
-                height += lesson_height(item)
-            height += 4
-        return height + 16
+            return height + 26 + (comment_height(view["comment"]) if view["comment"] else 0)
+        for _, entries in slots:
+            height += 13 + sum(entry_height(entry) for entry in entries) + 2
+        if view["comment"]:
+            height += comment_height(view["comment"])
+        return height + 8
 
     def draw_day(day, x, y, card_width, card_height):
+        view = ac.day_view(schedule, day, kind)
         card(draw, x, y, card_width, card_height, th, image)
         draw.rounded_rectangle([x + 20, y + 20, x + card_width - 20, y + 64],
                                radius=int(th.get("radius") or 0), fill=th["ink"])
-        draw_text(draw, x + 36, y + 28, ss.WEEKDAYS_RU[ss.WEEKDAYS[day.weekday()]], font(24, True), th["on_ink"])
+        day_name = ss.WEEKDAYS_RU[ss.WEEKDAYS[day.weekday()]]
+        draw_text(draw, x + 36, y + 28, day_name, font(24, True), th["on_ink"])
+        if view["removed"]:
+            strike_line(draw, x + 36, y + 28, day_name, font(24, True), strike)
         py = y + 76
-        grouped = {}
-        for lesson in ss.lessons_for(schedule, day):
-            grouped.setdefault(lesson.get("time", ""), []).append(lesson)
-        slots = [(key, grouped[key]) for key in sorted(grouped.keys(), key=lambda value: value.split("-")[0])]
+        if view["removed"]:
+            draw_text(draw, x + 20, py, "день отменён", font(22), th["muted"])
+            py += 26
+            draw_comment(view["comment"], x + 20, py)
+            return
+        slots = ac.slots(view)
         if not slots:
             draw_text(draw, x + 20, py, "нет пар", font(22), th["muted"])
+            py += 26
+            draw_comment(view["comment"], x + 20, py)
             return
-        for time_slot, items in slots:
+        for time_slot, entries in slots:
             draw_text(draw, x + 20, py, time_slot, font(18, True), th["muted"])
             py += 26
-            for item in items:
-                if item.get("subgroup") and item["subgroup"] != "все":
-                    draw_text(draw, x + 20, py, item["subgroup"], font(18), th["muted"])
-                    py += 22
-                lines = wrap(draw, item.get("subject", ""), font(24, True), text_width_value)
-                for line in lines:
-                    draw_text(draw, x + 20, py, line, font(24, True), th["ink"])
-                    py += 28
-                meta = ", ".join(part for part in (item.get("type"), item.get("room")) if part)
-                for line in wrap(draw, meta, font(18), text_width_value):
-                    draw_text(draw, x + 20, py, line, font(18), th["muted"])
-                    py += 22
-                teachers = teachers_of(item)
-                if teachers:
-                    draw_text(draw, x + 20, py, teachers, font(16), th["muted"])
-                    py += 22
-                py += 8
+            for entry in entries:
+                py = draw_entry(entry, x + 20, py)
             py += 4
+        if view["comment"]:
+            draw_comment(view["comment"], x + 20, py + 2)
 
     row_one = days[:3]
     row_two = days[3:6]
